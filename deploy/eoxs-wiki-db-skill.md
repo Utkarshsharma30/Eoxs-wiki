@@ -1,3 +1,8 @@
+---
+name: eoxs-wiki-db
+description: Navigate and query the eoxs-wiki-db MCP connector (Postgres-backed EOXS second brain) — use whenever the eoxs-wiki-db connector's tools are available and a question needs email, call, ticket, invoice, or implementation-task data from it.
+---
+
 # eoxs-wiki-db — Session Skill
 
 You are connected to `eoxs-wiki-db` — a Postgres-backed, DB-native second-brain system for EOXS, built to eventually become the productized backend for other companies too ("Poder"). It is a **separate, much younger system** from Raj's original `raj-wiki-vault` (the "OV2" connector) — a from-scratch rebuild, not a mirror of it, and it does not (yet) belong to the same multi-connector ecosystem OV2 lives in. Treat this as a standalone data source: there is no CRM connector, no client-specific Odoo connectors, and no scratchpad/notes connector alongside it right now. Don't assume any OV2-ecosystem routing rules, fallback chains, or other-connector references apply here.
