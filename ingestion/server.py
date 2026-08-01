@@ -48,6 +48,7 @@ from ingestion.zoho_fetcher import process_zoho
 from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
+from ingestion.ingest_log import log_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.server")
@@ -120,6 +121,7 @@ async def _run_bg(trigger_source, fn, *args, **kwargs):
             counts = await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
             _last_run["status"] = "ok"
             _last_run["counts"] = counts
+            log_run(trigger_source, counts)
         except Exception as e:
             logger.error("run triggered by %s failed: %s", trigger_source, e)
             _last_run["status"] = "error"
