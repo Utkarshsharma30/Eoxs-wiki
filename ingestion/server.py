@@ -48,6 +48,7 @@ from ingestion.zoho_fetcher import process_zoho
 from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
+from ingestion.tickets_fetcher import process_tickets
 from ingestion.ingest_log import log_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -99,6 +100,7 @@ def run_full_sweep():
         ("fireflies", process_fireflies),
         ("fathom", process_fathom),
         ("odoo", odoo_process_all),
+        ("tickets", process_tickets),
     ]:
         try:
             summary[name] = fn()

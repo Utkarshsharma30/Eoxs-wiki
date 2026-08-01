@@ -19,8 +19,8 @@ Unlike a mature vault with years of synthesis behind it, `eoxs-wiki-db`:
 
 - **Has no synthesized wiki layer yet.** `wiki_pages` is 0. `search_wiki` and `get_wiki_page` are real, callable tools, but they will return nothing until a future wiki-ingestion pass exists. Don't call them expecting a curated shortcut — go straight to raw data.
 - **Raw ingestion is live but small and actively growing.** Emails, call transcripts, and client records flow in via automated fetchers (a 2-hour sweep plus best-effort webhooks). Row counts change between sessions — always trust `get_index()`'s live numbers over any figure you remember from a prior conversation, including this document.
-- **Tickets and invoices have NO live ingestion.** `tickets`/`search_tickets`/`get_ticket` and `sales_orders`/`search_invoices`/`get_invoice` are real tools over real tables, but those tables are only populated from a one-time historical load — treat anything they return as a potentially stale snapshot, not current state, and say so.
-- **Implementation/Kanban tasks are a SEPARATE data source from support tickets** — a client's onboarding/dev Kanban board (`list_implementation_tasks`/`search_implementation_tasks`/`get_implementation_task`), not the same thing as `search_tickets`/`get_ticket`. Unlike tickets/invoices, this data IS live-ingesting (currently the largest single table by row count) — don't apply the "historical snapshot" caveat to it.
+- **Tickets are now live-ingesting** (`search_tickets`/`get_ticket`) — fetched directly from EOXS's central support Odoo instance, incremental via `write_date`. **Invoices/sales orders still have NO live ingestion** (`sales_orders`/`search_invoices`/`get_invoice`) — that table is only populated from a one-time historical load; treat anything it returns as a potentially stale snapshot, not current state, and say so.
+- **Implementation/Kanban tasks are a SEPARATE data source from support tickets** — a client's onboarding/dev Kanban board (`list_implementation_tasks`/`search_implementation_tasks`/`get_implementation_task`, sourced from each client's own per-client Odoo instance), not the same thing as `search_tickets`/`get_ticket` (sourced from EOXS's central support Odoo instance). Both are live-ingesting now.
 - **There is no CRM/prospect data at all** in this system (no `search_prospects`/`get_prospect` equivalents). Don't imply pipeline/deal-stage answers are available here.
 - **There is no save/notes tool.** If asked to save an analysis or transcript, say plainly that this connector doesn't support that.
 
@@ -56,7 +56,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 
 **`get_call(identifier)`** — Full transcript (all speaker segments). Pass the `id` from a list/search result — this is the fix for "found the call but couldn't get its transcript," which happened before `id`-based lookup existed.
 
-### Support Tickets (raw, historical snapshot only — see Section 0)
+### Support Tickets (raw, live-ingesting — from EOXS's central support Odoo instance, distinct from per-client implementation Kanban)
 
 **`search_tickets(query)`** — Searches by client, subject, description, or ticket number.
 
@@ -93,7 +93,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
    search_emails(<term>, account="all")
 3. If about a meeting/discussion:
    search_calls(<term>)
-4. If about a support issue (caveat: historical snapshot, see Section 0):
+4. If about a support issue:
    search_tickets(<term>)
 5. If about billing/revenue (caveat: historical snapshot, see Section 0):
    search_invoices(<term>)
@@ -114,7 +114,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 1. list_clients() if you need to confirm the exact slug/name
 2. search_emails(<company>, account="all")
 3. search_calls(<company>)
-4. search_tickets(<company>) — flag as historical snapshot, not current status
+4. search_tickets(<company>) — live support ticket history
 5. search_invoices(<company>) — flag as historical snapshot, not current status
 6. search_implementation_tasks(<term>, client=<slug>) or
    list_implementation_tasks(client=<slug>) — live onboarding/dev Kanban state,
