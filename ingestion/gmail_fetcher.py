@@ -45,9 +45,9 @@ def get_gmail_service(account):
     prefix = ACCOUNTS[account]
     creds = Credentials(
         None,
-        refresh_token=os.environ[f"{prefix}_GMAIL_REFRESH_TOKEN"],
-        client_id=os.environ[f"{prefix}_GMAIL_CLIENT_ID"],
-        client_secret=os.environ[f"{prefix}_GMAIL_CLIENT_SECRET"],
+        refresh_token=os.environ[f"{prefix}_REFRESH_TOKEN"],
+        client_id=os.environ[f"{prefix}_CLIENT_ID"],
+        client_secret=os.environ[f"{prefix}_CLIENT_SECRET"],
         token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
     )
