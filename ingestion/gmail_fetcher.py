@@ -18,14 +18,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from google.auth.exceptions import TransportError
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
 from ingestion.write_email import write_thread, existing_message_count
+from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.gmail")
@@ -41,6 +44,29 @@ DEFAULT_MAX_RESULTS = 500
 DEFAULT_SAFETY_OVERLAP_DAYS = 2
 
 
+def _is_retryable(e):
+    """429/5xx and transport-level failures are transient; anything else
+    (400/401/403/404/...) means retrying won't help. googleapiclient's own
+    num_retries already backs off within a single .execute() call -- this
+    is a belt-and-suspenders outer layer for failures it doesn't cover
+    (credential refresh, errors raised before any HTTP response)."""
+    if isinstance(e, HttpError):
+        status = e.resp.status
+        return status == 429 or status >= 500
+    return isinstance(e, (TransportError, ConnectionError, TimeoutError))
+
+
+def _retry_after(e):
+    if isinstance(e, HttpError):
+        value = e.resp.get("retry-after")
+        if value is not None:
+            try:
+                return float(value)
+            except ValueError:
+                return None
+    return None
+
+
 def get_gmail_service(account):
     prefix = ACCOUNTS[account]
     creds = Credentials(
@@ -51,7 +77,7 @@ def get_gmail_service(account):
         token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
     )
-    creds.refresh(Request())
+    call_with_retry(lambda: creds.refresh(Request()), is_retryable=_is_retryable, retry_after_getter=_retry_after)
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
@@ -65,10 +91,14 @@ def fetch_thread_ids(service, query, max_results):
     ids = []
     page_token = None
     while len(ids) < max_results:
-        resp = service.users().threads().list(
+        request = service.users().threads().list(
             userId="me", q=query, maxResults=min(100, max_results - len(ids)),
             pageToken=page_token,
-        ).execute(num_retries=GMAIL_NUM_RETRIES)
+        )
+        resp = call_with_retry(
+            lambda: request.execute(num_retries=GMAIL_NUM_RETRIES),
+            is_retryable=_is_retryable, retry_after_getter=_retry_after,
+        )
         ids.extend(t["id"] for t in resp.get("threads", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -99,8 +129,10 @@ def header(headers, name):
 
 
 def fetch_thread_detail(service, thread_id):
-    thread = service.users().threads().get(userId="me", id=thread_id, format="full").execute(
-        num_retries=GMAIL_NUM_RETRIES
+    request = service.users().threads().get(userId="me", id=thread_id, format="full")
+    thread = call_with_retry(
+        lambda: request.execute(num_retries=GMAIL_NUM_RETRIES),
+        is_retryable=_is_retryable, retry_after_getter=_retry_after,
     )
     messages = thread.get("messages", [])
     if not messages:

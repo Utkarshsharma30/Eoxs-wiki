@@ -27,6 +27,7 @@ from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_
 from ingestion.spam_filter import is_eoxs_relevant
 from ingestion.write_email import write_thread, existing_message_count
 from ingestion.db import get_live_conn
+from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.zoho")
@@ -42,6 +43,25 @@ DEFAULT_SAFETY_OVERLAP_DAYS = 2
 PAGE_SIZE = 200
 
 
+def _is_retryable(e):
+    """429 and 5xx are transient; anything else (400/401/404/...) is not."""
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        return status == 429 or status >= 500
+    return isinstance(e, httpx.TransportError)
+
+
+def _retry_after(e):
+    if isinstance(e, httpx.HTTPStatusError):
+        value = e.response.headers.get("Retry-After")
+        if value is not None:
+            try:
+                return float(value)
+            except ValueError:
+                return None
+    return None
+
+
 class ZohoClient:
     def __init__(self):
         # Every Zoho Mail API endpoint is scoped under /accounts/{account_id}/.
@@ -50,16 +70,20 @@ class ZohoClient:
         self._client = httpx.Client(timeout=30.0)
 
     def _refresh_access_token(self):
-        resp = self._client.post(
-            f"{ACCOUNTS_BASE}/oauth/v2/token",
-            data={
-                "refresh_token": os.environ["ZOHO_REFRESH_TOKEN"],
-                "client_id": os.environ["ZOHO_CLIENT_ID"],
-                "client_secret": os.environ["ZOHO_CLIENT_SECRET"],
-                "grant_type": "refresh_token",
-            },
-        )
-        resp.raise_for_status()
+        def do_refresh():
+            resp = self._client.post(
+                f"{ACCOUNTS_BASE}/oauth/v2/token",
+                data={
+                    "refresh_token": os.environ["ZOHO_REFRESH_TOKEN"],
+                    "client_id": os.environ["ZOHO_CLIENT_ID"],
+                    "client_secret": os.environ["ZOHO_CLIENT_SECRET"],
+                    "grant_type": "refresh_token",
+                },
+            )
+            resp.raise_for_status()
+            return resp
+
+        resp = call_with_retry(do_refresh, is_retryable=_is_retryable, retry_after_getter=_retry_after)
         self._access_token = resp.json()["access_token"]
 
     def _request(self, method, url, retried=False, **kwargs):
@@ -67,12 +91,21 @@ class ZohoClient:
             self._refresh_access_token()
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Zoho-oauthtoken {self._access_token}"
-        resp = self._client.request(method, url, headers=headers, **kwargs)
-        if resp.status_code == 401 and not retried:
-            self._refresh_access_token()
-            return self._request(method, url, retried=True, headers=headers, **kwargs)
-        resp.raise_for_status()
-        return resp
+
+        def do_request():
+            resp = self._client.request(method, url, headers=headers, **kwargs)
+            # 401 isn't in _is_retryable, so call_with_retry re-raises it
+            # immediately -- handled by the refresh-and-retry-once path below.
+            resp.raise_for_status()
+            return resp
+
+        try:
+            return call_with_retry(do_request, is_retryable=_is_retryable, retry_after_getter=_retry_after)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401 and not retried:
+                self._refresh_access_token()
+                return self._request(method, url, retried=True, headers=headers, **kwargs)
+            raise
 
     def list_all_messages(self, after_epoch_ms, max_results):
         messages = []
