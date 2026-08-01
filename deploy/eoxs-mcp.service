@@ -1,0 +1,20 @@
+[Unit]
+Description=eoxs-wiki-db MCP server (Streamable HTTP transport, for remote connectors)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/eoxs-wiki-db
+EnvironmentFile=/home/deploy/eoxs-wiki-db/.env
+ExecStart=/home/deploy/eoxs-wiki-db/.venv/bin/python3 -m mcp_server.http_server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eoxs-mcp
+
+[Install]
+WantedBy=multi-user.target
