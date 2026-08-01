@@ -1,0 +1,10 @@
+[Unit]
+Description=Run eoxs-sweep every 2 hours (raw-ingestion cron fallback)
+
+[Timer]
+OnCalendar=00/2:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -9,14 +9,14 @@ REPO_DIR="/home/deploy/eoxs-wiki-db"
 PUBLIC_IP="5.223.44.95"
 CONTACT_EMAIL="eoxs.innovation@gmail.com"
 
-echo "== 1/8: installing eoxs-ingestion systemd service =="
+echo "== 1/9: installing eoxs-ingestion systemd service =="
 cp "$REPO_DIR/deploy/eoxs-ingestion.service" /etc/systemd/system/eoxs-ingestion.service
 systemctl daemon-reload
 systemctl enable --now eoxs-ingestion
 sleep 2
 systemctl is-active --quiet eoxs-ingestion && echo "eoxs-ingestion: active" || { echo "eoxs-ingestion FAILED to start"; systemctl status eoxs-ingestion --no-pager; exit 1; }
 
-echo "== 2/8: opening 80/443 in ufw (default-deny incoming; only 22 was allowed) =="
+echo "== 2/9: opening 80/443 in ufw (default-deny incoming; only 22 was allowed) =="
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 80/tcp
   ufw allow 443/tcp
@@ -25,15 +25,15 @@ else
   echo "ufw not active -- skipping (nothing to open)"
 fi
 
-echo "== 3/8: installing nginx =="
+echo "== 3/9: installing nginx =="
 apt-get update -qq
 apt-get install -y -qq nginx
 
-echo "== 4/8: installing certbot via snap (apt's certbot is 2.9, too old for --ip-address) =="
+echo "== 4/9: installing certbot via snap (apt's certbot is 2.9, too old for --ip-address) =="
 snap install --classic certbot
 ln -sf /snap/bin/certbot /usr/local/bin/certbot
 
-echo "== 5/8: phase 1 -- HTTP-only nginx config, to serve the ACME challenge =="
+echo "== 5/9: phase 1 -- HTTP-only nginx config, to serve the ACME challenge =="
 mkdir -p /var/www/certbot
 cp "$REPO_DIR/deploy/nginx-http-only.conf" /etc/nginx/sites-available/eoxs-ingestion
 ln -sf /etc/nginx/sites-available/eoxs-ingestion /etc/nginx/sites-enabled/eoxs-ingestion
@@ -41,12 +41,12 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx || systemctl restart nginx
 
-echo "== 6/8: requesting the IP-address certificate (valid ~6-7 days, auto-renews) =="
+echo "== 6/9: requesting the IP-address certificate (valid ~6-7 days, auto-renews) =="
 certbot certonly --webroot -w /var/www/certbot \
   --ip-address "$PUBLIC_IP" --preferred-profile shortlived \
   --agree-tos --non-interactive -m "$CONTACT_EMAIL"
 
-echo "== 7/8: phase 2 -- HTTPS nginx config + reload-hook so nginx picks up each renewal =="
+echo "== 7/9: phase 2 -- HTTPS nginx config + reload-hook so nginx picks up each renewal =="
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cp "$REPO_DIR/deploy/reload-nginx.sh" /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
@@ -54,8 +54,15 @@ cp "$REPO_DIR/deploy/nginx-https.conf" /etc/nginx/sites-available/eoxs-ingestion
 nginx -t
 systemctl reload nginx
 
-echo "== 8/8: confirming the snap-bundled renewal timer (runs 2x/day, well under the 3-day requirement) =="
+echo "== 8/9: confirming the snap-bundled renewal timer (runs 2x/day, well under the 3-day requirement) =="
 systemctl list-timers snap.certbot.renew.timer --no-pager || echo "WARNING: snap.certbot.renew.timer not found -- check manually"
+
+echo "== 9/9: installing the 2-hourly full-sweep cron-fallback timer =="
+cp "$REPO_DIR/deploy/eoxs-sweep.service" /etc/systemd/system/eoxs-sweep.service
+cp "$REPO_DIR/deploy/eoxs-sweep.timer" /etc/systemd/system/eoxs-sweep.timer
+systemctl daemon-reload
+systemctl enable --now eoxs-sweep.timer
+systemctl list-timers eoxs-sweep.timer --no-pager
 
 echo
 echo "Done. Verify with:"
