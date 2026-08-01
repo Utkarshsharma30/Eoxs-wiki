@@ -143,6 +143,18 @@ class ZohoClient:
         )
         return resp.json().get("data", {})
 
+    def fetch_attachment_info(self, folder_id, message_id):
+        """Zoho requires this separate call even when the message's own
+        hasAttachment flag is set -- attachment IDs/names/sizes aren't
+        included in the message listing."""
+        resp = self._request(
+            "GET",
+            f"{MAIL_API_BASE}/accounts/{self.account_id}/folders/{folder_id}/messages/{message_id}/attachmentinfo",
+        )
+        data = resp.json().get("data", {})
+        attachments = data.get("attachments", []) if isinstance(data, dict) else []
+        return attachments if isinstance(attachments, list) else []
+
 
 def decode_zoho_body(content_data):
     raw = content_data.get("content", "")
@@ -196,6 +208,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 continue
 
             msg_records = []
+            attachments_by_message_index = {}
             for i, m in enumerate(msgs):
                 content = client.fetch_message_content(m["folderId"], m["messageId"])
                 body = decode_zoho_body(content)
@@ -207,6 +220,22 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                     "from_addr": m.get("fromAddress"),
                     "body": body,
                 })
+
+                # hasAttachment is the string "1"/"0", not a bool -- "0" is
+                # truthy in Python, so an `if m.get("hasAttachment")` check
+                # would wrongly fire on every message. Metadata only, no
+                # byte content (v1 scope, see schema/015's comment).
+                if str(m.get("hasAttachment")) == "1":
+                    for att in client.fetch_attachment_info(m["folderId"], m["messageId"]):
+                        size = att.get("attachmentSize")
+                        try:
+                            size_int = int(size)
+                        except (TypeError, ValueError):
+                            size_int = None
+                        attachments_by_message_index.setdefault(i + 1, []).append({
+                            "filename": att.get("attachmentName") or f"attachment-{att.get('attachmentId', '')}",
+                            "size_bytes": size_int,
+                        })
 
             subject = msgs[0].get("subject", "(no subject)")
             participants = sorted({
@@ -235,6 +264,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 thread_dates=[m["message_date"] for m in msg_records if m["message_date"]],
                 tags=["email", SOURCE], is_quarantined=False, generated_at=now_utc(),
                 messages=msg_records,
+                attachments_by_message_index=attachments_by_message_index,
             )
             mark_messages_seen(message_ids, SOURCE)
             counts["written"] += 1

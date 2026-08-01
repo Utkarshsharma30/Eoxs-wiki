@@ -128,6 +128,49 @@ def header(headers, name):
     return None
 
 
+def _content_disposition_is_inline(part):
+    for h in part.get("headers", []) or []:
+        if h.get("name", "").lower() == "content-disposition":
+            return h.get("value", "").lower().strip().startswith("inline")
+    return any(h.get("name", "").lower() == "content-id" for h in part.get("headers", []) or [])
+
+
+def find_gmail_attachment_parts(payload):
+    """Recursively walks payload.parts collecting every part that carries a
+    non-empty filename -- Gmail's signal for "this part is an attachment,
+    not inline body text". Free/zero-API-cost: already in the fetched
+    thread detail (format="full"), no extra request needed."""
+    found = []
+    if payload.get("filename"):
+        found.append(payload)
+    for part in payload.get("parts", []) or []:
+        found.extend(find_gmail_attachment_parts(part))
+    return found
+
+
+def extract_attachments(payload):
+    """Metadata only (filename/size/note) -- no byte content is downloaded
+    or stored in this system (v1 scope, matching the same decision made
+    for Odoo implementation-task attachments in schema/014's comment).
+    Nothing is silently dropped: every attachment part found gets a row,
+    inline images (signature logos, tracking pixels) are still recorded,
+    just noted as such."""
+    attachments = []
+    for part in find_gmail_attachment_parts(payload):
+        size = part.get("body", {}).get("size")
+        try:
+            size_int = int(size)
+        except (TypeError, ValueError):
+            size_int = None
+        note = "inline image" if _content_disposition_is_inline(part) else None
+        attachments.append({
+            "filename": part.get("filename") or f"attachment-{part.get('body', {}).get('attachmentId', '')}",
+            "size_bytes": size_int,
+            "note": note,
+        })
+    return attachments
+
+
 def fetch_thread_detail(service, thread_id):
     request = service.users().threads().get(userId="me", id=thread_id, format="full")
     thread = call_with_retry(
@@ -146,6 +189,7 @@ def fetch_thread_detail(service, thread_id):
     participants = set()
     msg_records = []
     message_ids = []
+    attachments_by_message_index = {}
     for i, m in enumerate(messages):
         headers_i = m["payload"]["headers"]
         from_i = header(headers_i, "From") or ""
@@ -165,6 +209,10 @@ def fetch_thread_detail(service, thread_id):
         })
         message_ids.append(m["id"])
 
+        atts = extract_attachments(m["payload"])
+        if atts:
+            attachments_by_message_index[i + 1] = atts
+
     return {
         "gmail_thread_id": thread_id,
         "subject": subject,
@@ -175,6 +223,7 @@ def fetch_thread_detail(service, thread_id):
         "thread_dates": [m["message_date"] for m in msg_records if m["message_date"]],
         "messages": msg_records,
         "message_ids": message_ids,
+        "attachments_by_message_index": attachments_by_message_index,
     }
 
 
@@ -229,6 +278,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 message_count=detail["message_count"], participants=detail["participants"],
                 thread_dates=detail["thread_dates"], tags=["email", account],
                 is_quarantined=False, generated_at=now_utc(), messages=detail["messages"],
+                attachments_by_message_index=detail["attachments_by_message_index"],
             )
             mark_messages_seen(detail["message_ids"], account)
             counts["written"] += 1
