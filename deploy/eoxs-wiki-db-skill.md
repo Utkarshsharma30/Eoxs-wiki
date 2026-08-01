@@ -15,7 +15,7 @@ Unlike a mature vault with years of synthesis behind it, `eoxs-wiki-db`:
 - **Has no synthesized wiki layer yet.** `wiki_pages` is 0. `search_wiki` and `get_wiki_page` are real, callable tools, but they will return nothing until a future wiki-ingestion pass exists. Don't call them expecting a curated shortcut — go straight to raw data.
 - **Raw ingestion is live but small and actively growing.** Emails, call transcripts, and client records flow in via automated fetchers (a 2-hour sweep plus best-effort webhooks). Row counts change between sessions — always trust `get_index()`'s live numbers over any figure you remember from a prior conversation, including this document.
 - **Tickets and invoices have NO live ingestion.** `tickets`/`search_tickets`/`get_ticket` and `sales_orders`/`search_invoices`/`get_invoice` are real tools over real tables, but those tables are only populated from a one-time historical load — treat anything they return as a potentially stale snapshot, not current state, and say so.
-- **Client implementation/Kanban task data exists in the database (hundreds of rows, growing) but has no MCP tool yet.** If asked about implementation tasks, stage history, or Odoo Kanban detail for a client, say this data isn't exposed through your current tools — don't guess or fabricate it, and don't confuse it with the ticket tools above.
+- **Implementation/Kanban tasks are a SEPARATE data source from support tickets** — a client's onboarding/dev Kanban board (`list_implementation_tasks`/`search_implementation_tasks`/`get_implementation_task`), not the same thing as `search_tickets`/`get_ticket`. Unlike tickets/invoices, this data IS live-ingesting (currently the largest single table by row count) — don't apply the "historical snapshot" caveat to it.
 - **There is no CRM/prospect data at all** in this system (no `search_prospects`/`get_prospect` equivalents). Don't imply pipeline/deal-stage answers are available here.
 - **There is no save/notes tool.** If asked to save an analysis or transcript, say plainly that this connector doesn't support that.
 
@@ -23,7 +23,7 @@ When in doubt about coverage, say what's missing rather than presenting a partia
 
 ---
 
-## 1. Your MCP Tools (15 total)
+## 1. Your MCP Tools (18 total)
 
 All tools are read-only (SELECT-only queries against Postgres). Every `search_*`/`list_*` result gives you a `file_path` (or `identifier`) to pass into the matching `get_*` call for full content — don't guess a path yourself.
 
@@ -69,6 +69,14 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 
 **`get_client_file(file_path)`** — Any row (ticket, sales order, call, or wiki page) by its original `file_path`, regardless of which table it's in.
 
+### Implementation Tasks (raw, live-ingesting — client onboarding/dev Kanban, NOT support tickets)
+
+**`list_implementation_tasks(client="", stage="")`** — Lists Odoo implementation Kanban tasks. `client`: client slug (e.g. `"greer-steel"`) or empty for all. `stage`: exact stage name (e.g. `"Completed"`) or empty for all.
+
+**`search_implementation_tasks(query, client="")`** — Full-text search by task name/description, optionally restricted to one client.
+
+**`get_implementation_task(task_id)`** — Full task detail (description, stage/owner/priority, complete chatter/stage-change event history, attachment metadata) by the numeric `id` from a list/search result. Note: `task_id` is an integer, not a string identifier like the ticket/invoice tools use.
+
 ---
 
 ## 2. Query Decision Trees
@@ -103,8 +111,9 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 3. search_calls(<company>)
 4. search_tickets(<company>) — flag as historical snapshot, not current status
 5. search_invoices(<company>) — flag as historical snapshot, not current status
-6. If asked about implementation/Kanban tasks specifically: say this isn't
-   exposed through your current tools (Section 0) rather than guessing
+6. search_implementation_tasks(<term>, client=<slug>) or
+   list_implementation_tasks(client=<slug>) — live onboarding/dev Kanban state,
+   separate from support tickets (see Section 0)
 ```
 
 ### When asked an open-ended / exploratory question
