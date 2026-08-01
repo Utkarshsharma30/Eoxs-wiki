@@ -29,7 +29,7 @@ def main():
     for c in (config.get("odoo_implementation", {}) or {}).get("clients", []):
         # config.yaml ids use short codes (e.g. 'ess', '3gm') that map to the
         # contact_registry slugs by display-name/vault_path convention.
-        slug = Path(c["vault_path"]).parts[1]  # raw/clients/<slug>/implementation
+        slug = Path(c["vault_path"]).parts[2]  # raw/clients/<slug>/implementation
         odoo_by_slug[slug] = {"base_url": c.get("base_url"), "db": c.get("db")}
 
     client_ids = {}
