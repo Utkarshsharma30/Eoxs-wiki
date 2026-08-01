@@ -37,7 +37,17 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 MCP_URL_SECRET = os.environ["MCP_URL_SECRET"]
 
-sse = SseServerTransport(f"/{MCP_URL_SECRET}/messages/")
+# Mounted with the /mcp prefix baked in (matching nginx's location /mcp/,
+# which passes the URI through UNCHANGED rather than stripping it -- see
+# deploy/nginx-https.conf). SseServerTransport uses this path to build the
+# "endpoint" event it sends the client (telling it where to POST messages),
+# so the app must know its real external path, not just its local one --
+# otherwise that URL is missing /mcp, the client's POST 404s against
+# nginx's default location (the OTHER app on port 8090), and the session
+# hangs after a successful-looking initial SSE connection.
+MOUNT_PREFIX = "/mcp"
+
+sse = SseServerTransport(f"{MOUNT_PREFIX}/{MCP_URL_SECRET}/messages/")
 
 
 async def _handle_sse_raw(scope, receive, send):
@@ -55,8 +65,8 @@ async def sse_endpoint(request):
 
 app = Starlette(
     routes=[
-        Route(f"/{MCP_URL_SECRET}/sse", endpoint=sse_endpoint, methods=["GET"]),
-        Mount(f"/{MCP_URL_SECRET}/messages/", app=sse.handle_post_message),
+        Route(f"{MOUNT_PREFIX}/{MCP_URL_SECRET}/sse", endpoint=sse_endpoint, methods=["GET"]),
+        Mount(f"{MOUNT_PREFIX}/{MCP_URL_SECRET}/messages/", app=sse.handle_post_message),
     ],
 )
 
