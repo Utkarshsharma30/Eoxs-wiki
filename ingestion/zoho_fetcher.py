@@ -34,6 +34,9 @@ logger = logging.getLogger("ingestion.zoho")
 SOURCE = "support_zoho"
 ACCOUNTS_BASE = "https://accounts.zoho.com"
 MAIL_API_BASE = "https://mail.zoho.com/api"
+# Not a secret -- Zoho's numeric mail-account identifier, same value as
+# tools/config.yaml's zoho.account_id in the file-based pipeline.
+ZOHO_ACCOUNT_ID = "5146160000000008002"
 DEFAULT_MAX_RESULTS = 20000
 DEFAULT_SAFETY_OVERLAP_DAYS = 2
 PAGE_SIZE = 200
@@ -41,7 +44,8 @@ PAGE_SIZE = 200
 
 class ZohoClient:
     def __init__(self):
-        self.account_id = os.environ.get("ZOHO_ACCOUNT_ID")  # optional; unified search doesn't need per-account scoping
+        # Every Zoho Mail API endpoint is scoped under /accounts/{account_id}/.
+        self.account_id = ZOHO_ACCOUNT_ID
         self._access_token = None
         self._client = httpx.Client(timeout=30.0)
 
@@ -74,9 +78,10 @@ class ZohoClient:
         messages = []
         seen_ids = set()
         start = 1
+        url = f"{MAIL_API_BASE}/accounts/{self.account_id}/messages/search"
         while len(messages) < max_results:
             resp = self._request(
-                "GET", f"{MAIL_API_BASE}/messages/search",
+                "GET", url,
                 params={"searchKey": "date:", "start": start, "limit": PAGE_SIZE},
             )
             data = resp.json().get("data", [])
@@ -100,7 +105,8 @@ class ZohoClient:
 
     def fetch_message_content(self, folder_id, message_id):
         resp = self._request(
-            "GET", f"{MAIL_API_BASE}/folders/{folder_id}/messages/{message_id}/content"
+            "GET",
+            f"{MAIL_API_BASE}/accounts/{self.account_id}/folders/{folder_id}/messages/{message_id}/content",
         )
         return resp.json().get("data", {})
 
