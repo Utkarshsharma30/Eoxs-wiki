@@ -38,7 +38,8 @@ def get_index():
             (SELECT count(*) FROM sales_orders) AS sales_orders,
             (SELECT count(*) FROM call_transcripts WHERE source='fireflies') AS fireflies_calls,
             (SELECT count(*) FROM call_transcripts WHERE source='fathom') AS fathom_calls,
-            (SELECT count(*) FROM clients) AS clients
+            (SELECT count(*) FROM clients) AS clients,
+            (SELECT count(*) FROM implementation_tasks) AS implementation_tasks
     """)
     by_type = db_query("SELECT page_type, count(*) AS n FROM wiki_pages GROUP BY page_type ORDER BY page_type")
     return {"totals": counts, "wiki_pages_by_type": by_type}
@@ -222,6 +223,60 @@ def get_client_file(file_path):
     return {"error": f"no row found for file_path '{file_path}' in any loaded table"}
 
 
+def list_implementation_tasks(client="", stage=""):
+    sql = """
+        SELECT it.id, c.slug AS client, it.project_name, it.task_name, it.stage, it.owner,
+               it.priority, it.kanban_state, it.active, it.task_created_date, it.deadline
+        FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
+        WHERE 1=1
+    """
+    params = []
+    if client:
+        sql += " AND c.slug = %s"
+        params.append(client)
+    if stage:
+        sql += " AND it.stage = %s"
+        params.append(stage)
+    sql += " ORDER BY it.task_created_date DESC NULLS LAST LIMIT 100"
+    return db_query(sql, params)
+
+
+def search_implementation_tasks(query, client=""):
+    sql = """
+        SELECT it.id, c.slug AS client, it.task_name, it.stage, it.owner, it.priority,
+               it.task_created_date
+        FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
+        WHERE (it.task_name ILIKE %s OR it.description ILIKE %s)
+    """
+    params = [f"%{query}%", f"%{query}%"]
+    if client:
+        sql += " AND c.slug = %s"
+        params.append(client)
+    sql += " ORDER BY it.task_created_date DESC NULLS LAST LIMIT 20"
+    return db_query(sql, params)
+
+
+def get_implementation_task(task_id):
+    task = db_query_one(
+        """SELECT it.*, c.slug AS client_slug, c.display_name AS client_name
+           FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
+           WHERE it.id = %s""",
+        (task_id,),
+    )
+    if not task:
+        return {"error": f"no implementation task with id={task_id}"}
+    task["events"] = db_query(
+        """SELECT event_order, event_type, author, event_time, body, tracking_changes
+           FROM implementation_task_events WHERE task_id = %s ORDER BY event_order""",
+        (task["id"],),
+    )
+    task["attachments"] = db_query(
+        "SELECT filename, mimetype, size_bytes FROM implementation_task_attachments WHERE task_id = %s",
+        (task["id"],),
+    )
+    return task
+
+
 TOOLS = {
     "get_index": get_index,
     "get_wiki_page": get_wiki_page,
@@ -238,6 +293,9 @@ TOOLS = {
     "search_invoices": search_invoices,
     "list_clients": list_clients,
     "get_client_file": get_client_file,
+    "list_implementation_tasks": list_implementation_tasks,
+    "search_implementation_tasks": search_implementation_tasks,
+    "get_implementation_task": get_implementation_task,
 }
 
 
@@ -324,6 +382,27 @@ async def list_tools():
             name="get_client_file",
             description="Return a row from any loaded table by its original source_file_path (ticket, sales order, call, or wiki page).",
             inputSchema={"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
+        ),
+        Tool(
+            name="list_implementation_tasks",
+            description="List Odoo implementation Kanban tasks (client onboarding/dev tasks -- distinct from support tickets). "
+                        "client: client slug (e.g. 'greer-steel') or empty for all. stage: exact stage name (e.g. 'Completed') or empty for all.",
+            inputSchema={"type": "object", "properties": {
+                "client": {"type": "string", "default": ""}, "stage": {"type": "string", "default": ""}}},
+        ),
+        Tool(
+            name="search_implementation_tasks",
+            description="Full-text search Odoo implementation Kanban tasks by task name or description. "
+                        "client: client slug to restrict to one client, or empty for all.",
+            inputSchema={"type": "object", "properties": {
+                "query": {"type": "string"}, "client": {"type": "string", "default": ""}}, "required": ["query"]},
+        ),
+        Tool(
+            name="get_implementation_task",
+            description="Return a full implementation task (description, stage/owner/priority, all chatter events "
+                        "including stage-change history, and attachment metadata) by its numeric id from a "
+                        "list/search_implementation_tasks result.",
+            inputSchema={"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
         ),
     ]
 
