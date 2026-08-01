@@ -110,10 +110,16 @@ def search_emails(query, account="all"):
     return db_query(sql, params)
 
 
-def get_email(file_path):
-    thread = db_query_one("SELECT * FROM email_threads WHERE source_file_path = %s", (file_path,))
+def get_email(identifier):
+    """identifier: the row's numeric id (from a search/list result -- REQUIRED for
+    API-ingested threads, which always have a NULL source_file_path) or a legacy
+    source_file_path string (only ever set for the historical file-based load)."""
+    if str(identifier).isdigit():
+        thread = db_query_one("SELECT * FROM email_threads WHERE id = %s", (int(identifier),))
+    else:
+        thread = db_query_one("SELECT * FROM email_threads WHERE source_file_path = %s", (identifier,))
     if not thread:
-        return {"error": f"no email thread at '{file_path}'"}
+        return {"error": f"no email thread matching '{identifier}'"}
     thread["messages"] = db_query(
         "SELECT message_index, message_date, from_addr, body FROM email_messages WHERE thread_id = %s ORDER BY message_index",
         (thread["id"],),
@@ -149,10 +155,17 @@ def search_calls(query, source=""):
     return db_query(sql, params)
 
 
-def get_call(file_path):
-    call = db_query_one("SELECT * FROM call_transcripts WHERE source_file_path = %s", (file_path,))
+def get_call(identifier):
+    """identifier: the row's numeric id (from a search/list result -- REQUIRED for
+    API-ingested calls, i.e. every Fireflies/Fathom call, which always have a NULL
+    source_file_path) or a legacy source_file_path string (only ever set for the
+    historical file-based load)."""
+    if str(identifier).isdigit():
+        call = db_query_one("SELECT * FROM call_transcripts WHERE id = %s", (int(identifier),))
+    else:
+        call = db_query_one("SELECT * FROM call_transcripts WHERE source_file_path = %s", (identifier,))
     if not call:
-        return {"error": f"no call at '{file_path}'"}
+        return {"error": f"no call matching '{identifier}'"}
     call["segments"] = db_query(
         "SELECT segment_order, speaker, text FROM call_segments WHERE call_id = %s ORDER BY segment_order",
         (call["id"],),
@@ -333,8 +346,10 @@ async def list_tools():
         ),
         Tool(
             name="get_email",
-            description="Return a full email thread (all messages) by its source_file_path.",
-            inputSchema={"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
+            description="Return a full email thread (all messages) by the 'id' from a list_emails/search_emails "
+                        "result. Also accepts a legacy source_file_path string, but every live-ingested (Gmail/"
+                        "Zoho) thread has a NULL source_file_path -- use 'id' for those, which is always present.",
+            inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
         ),
         Tool(
             name="list_calls",
@@ -350,8 +365,11 @@ async def list_tools():
         ),
         Tool(
             name="get_call",
-            description="Return a full call transcript (all speaker segments) by its source_file_path.",
-            inputSchema={"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
+            description="Return a full call transcript (all speaker segments) by the 'id' from a list_calls/"
+                        "search_calls result. Also accepts a legacy source_file_path string, but every "
+                        "live-ingested (Fireflies/Fathom) call has a NULL source_file_path -- use 'id' for "
+                        "those, which is always present.",
+            inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
         ),
         Tool(
             name="get_ticket",

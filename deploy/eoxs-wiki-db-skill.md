@@ -30,7 +30,7 @@ When in doubt about coverage, say what's missing rather than presenting a partia
 
 ## 1. Your MCP Tools (18 total)
 
-All tools are read-only (SELECT-only queries against Postgres). Every `search_*`/`list_*` result gives you a `file_path` (or `identifier`) to pass into the matching `get_*` call for full content — don't guess a path yourself.
+All tools are read-only (SELECT-only queries against Postgres). Every `search_*`/`list_*` result gives you an `id` to pass into the matching `get_*` call for full content — don't guess an id or path yourself. **Use `id`, not `source_file_path`**: every live-ingested row (all current emails, all Fireflies/Fathom calls) has a NULL `source_file_path` by design, since it only ever applied to the old file-based system. `source_file_path` still works as a fallback for the small number of historical file-based rows that have one, but `id` is what actually works for real data right now.
 
 ### Wiki (synthesized layer — currently empty, see Section 0)
 
@@ -46,7 +46,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 
 **`list_emails(account="all", month="")`** — Lists email threads, filterable by account and `"YYYY-MM"` month.
 
-**`get_email(file_path)`** — Full thread (all messages) by its `file_path` from a search/list result.
+**`get_email(identifier)`** — Full thread (all messages). Pass the `id` from a list/search result.
 
 ### Calls — Fireflies AND Fathom unified under one tool set (different from OV2, which has separate Fathom tools)
 
@@ -54,7 +54,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 
 **`list_calls(month="", source="")`** — Lists call transcripts, filterable by month and source.
 
-**`get_call(file_path)`** — Full transcript (all speaker segments) by `file_path`.
+**`get_call(identifier)`** — Full transcript (all speaker segments). Pass the `id` from a list/search result — this is the fix for "found the call but couldn't get its transcript," which happened before `id`-based lookup existed.
 
 ### Support Tickets (raw, historical snapshot only — see Section 0)
 
@@ -72,7 +72,7 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 
 **`list_clients()`** — All clients in the registry (slug, display name, domains, Odoo instance base URL).
 
-**`get_client_file(file_path)`** — Any row (ticket, sales order, call, or wiki page) by its original `file_path`, regardless of which table it's in.
+**`get_client_file(file_path)`** — Any row (ticket, sales order, call, or wiki page) by its original `file_path`, regardless of which table it's in. Unlike `get_email`/`get_call`, this one is still `source_file_path`-only — it won't find live-ingested calls (use `get_call` with an `id` for those instead).
 
 ### Implementation Tasks (raw, live-ingesting — client onboarding/dev Kanban, NOT support tickets)
 
