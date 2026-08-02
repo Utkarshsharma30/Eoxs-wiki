@@ -235,6 +235,32 @@ def list_client_slugs():
         conn.close()
 
 
+def build_all_candidates(since_by_kind=None):
+    """Returns {source_kind: rows} for every partition, WITHOUT filter_unchanged
+    or cursor side effects -- the same per-partition queries run_detection uses,
+    exposed separately so a resume path can reconstruct an interrupted cycle's
+    exact original candidate set (calling run_detection again would find nothing,
+    since its own filter_unchanged call already marked everything 'processed').
+
+    since_by_kind: optional {source_kind: since_timestamp} override, defaulting
+    to None (full backfill) per partition -- pass this when reconstructing a
+    cycle that ran with real cursors rather than a from-scratch backfill."""
+    since_by_kind = since_by_kind or {}
+    partitions = {}
+
+    for account in EMAIL_ACCOUNTS:
+        partitions[account] = candidates_email(account, since_by_kind.get(account))
+
+    partitions["tickets"] = candidates_tickets(since_by_kind.get("tickets"))
+    partitions["calls"] = candidates_calls(since_by_kind.get("calls"))
+
+    for slug in list_client_slugs():
+        source_kind = f"client_{slug}"
+        partitions[source_kind] = candidates_implementation_tasks(slug, since_by_kind.get(source_kind))
+
+    return partitions
+
+
 def run_detection(cycle_id=None, advance_cursors=True):
     """Runs detection across every partition. Returns {source_kind: [rows]}
     for partitions with at least one changed row -- empty partitions are
