@@ -270,6 +270,15 @@ def search_implementation_tasks(query, client=""):
 
 
 def get_implementation_task(task_id):
+    """Looks up by the serial `id` first, falling back to `odoo_task_id`.
+    The fallback exists because odoo_fetcher.py full-refreshes (DELETE+
+    INSERT) this table on every raw-ingestion sweep, so `id` isn't stable
+    across time the way `odoo_task_id` is -- a caller (like the
+    wiki-ingestion pipeline, which can reference a task hours or days
+    after first seeing it) needs a lookup that still resolves after `id`
+    has shifted. The two id spaces don't overlap (id: 15000s+, odoo_task_id:
+    under 1000, verified empirically), so trying `id` first is unambiguous
+    and doesn't change behavior for any existing caller passing a real id."""
     task = db_query_one(
         """SELECT it.*, c.slug AS client_slug, c.display_name AS client_name
            FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
@@ -277,7 +286,14 @@ def get_implementation_task(task_id):
         (task_id,),
     )
     if not task:
-        return {"error": f"no implementation task with id={task_id}"}
+        task = db_query_one(
+            """SELECT it.*, c.slug AS client_slug, c.display_name AS client_name
+               FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
+               WHERE it.odoo_task_id = %s""",
+            (task_id,),
+        )
+    if not task:
+        return {"error": f"no implementation task with id or odoo_task_id={task_id}"}
     task["events"] = db_query(
         """SELECT event_order, event_type, author, event_time, body, tracking_changes
            FROM implementation_task_events WHERE task_id = %s ORDER BY event_order""",

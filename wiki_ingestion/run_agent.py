@@ -45,7 +45,11 @@ def _row_summary(row, source_kind):
     if source_kind == "tickets":
         return f"- ticket id={row['id']} {row.get('ticket_number', '')}: {row.get('subject', '')}"
     if source_kind.startswith("client_"):
-        return f"- implementation task id={row['id']}: {row.get('task_name', '')} (stage: {row.get('stage', '')})"
+        # odoo_task_id, not the volatile serial `id` -- implementation_tasks gets a full
+        # DELETE+INSERT every raw-ingestion sweep, so `id` can go stale by the time this
+        # gets cited/reviewed hours later. get_implementation_task resolves either, but
+        # only odoo_task_id survives a table refresh -- always cite that one.
+        return f"- implementation task odoo_task_id={row['odoo_task_id']}: {row.get('task_name', '')} (stage: {row.get('stage', '')})"
     if source_kind == "calls":
         return f"- call id={row['id']} ({row.get('source', '')}): {row.get('meeting_title', '')}"
     return f"- email thread id={row['id']}: {row.get('subject', '')}"  # email accounts

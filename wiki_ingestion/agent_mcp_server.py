@@ -218,7 +218,10 @@ async def list_tools():
         Tool(
             name="add_staging_citation",
             description="Cite a raw source row on a staging page you created/updated this call. "
-                        "source_type: 'email_thread'|'ticket'|'call_transcript'|'implementation_task'.",
+                        "source_type: 'email_thread'|'ticket'|'call_transcript'|'implementation_task'. "
+                        "For 'implementation_task', source_id MUST be odoo_task_id, never the internal `id` "
+                        "field (get_implementation_task's response includes both -- `id` is unstable across "
+                        "raw-ingestion refreshes and a citation using it can go stale within hours).",
             inputSchema={"type": "object", "properties": {
                 "staging_page_id": {"type": "integer"}, "source_type": {"type": "string"},
                 "source_id": {"type": "integer"}, "source_ref_raw": {"type": "string"},
