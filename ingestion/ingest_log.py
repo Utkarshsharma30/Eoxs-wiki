@@ -1,12 +1,18 @@
 """Raw-ingestion run observability: writes one row per completed run
 (webhook-triggered single-source or cron/manual full-sweep) into the
 existing ingest_log table, dual-written to live+staging like everything
-else. Replaces the originally-planned Linear EDB reporting -- the Linear
-workspace's plan caps it at 1 team, already used by wiki-agent's WIK
-board, so a second team isn't available. Detailed per-request/per-fetcher
-logs still go through standard Python logging -> journalctl once this
-runs as a systemd service; ingest_log is the SQL-queryable summary layer
-on top of that, mirroring the file-based system's log.md replica table.
+else. Records EVERY trigger, granularly -- unlike linear_report.py, which
+only fires for full-sweep runs, this is the complete audit trail. Detailed
+per-request/per-fetcher logs still go through standard Python logging ->
+journalctl once this runs as a systemd service; ingest_log is the
+SQL-queryable summary layer on top of that, mirroring the file-based
+system's log.md replica table.
+
+(Originally this was going to BE the Linear EDB reporting, substituted
+here because the Linear workspace was capped at 1 team at the time,
+already used by wiki-agent's WIK board -- EDB exists for real now, see
+linear_report.py, and the two coexist: this table for every trigger,
+Linear for the periodic human-glanceable summary.)
 """
 import logging
 

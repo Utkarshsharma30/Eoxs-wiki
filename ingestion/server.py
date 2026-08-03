@@ -50,6 +50,7 @@ from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
 from ingestion.tickets_fetcher import process_tickets
 from ingestion.ingest_log import log_run
+from ingestion.linear_report import report_full_sweep
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.server")
@@ -110,7 +111,12 @@ def run_full_sweep():
     return summary
 
 
-async def _run_bg(trigger_source, fn, *args, **kwargs):
+async def _run_bg(trigger_source, fn, *args, report_to_linear=False, **kwargs):
+    """report_to_linear is True only for full-sweep triggers (manual
+    endpoint) -- NOT individual-source webhook triggers (a single new
+    Gmail message or Fireflies call would otherwise flood the EDB board
+    with an issue apiece). ingest_log.log_run still records every
+    trigger, webhook or sweep, regardless."""
     if _sweep_lock.locked():
         logger.info("Run already in progress -- skipping duplicate trigger from %s", trigger_source)
         return
@@ -124,6 +130,8 @@ async def _run_bg(trigger_source, fn, *args, **kwargs):
             _last_run["status"] = "ok"
             _last_run["counts"] = counts
             log_run(trigger_source, counts)
+            if report_to_linear:
+                report_full_sweep(counts)
         except Exception as e:
             logger.error("run triggered by %s failed: %s", trigger_source, e)
             _last_run["status"] = "error"
@@ -221,7 +229,7 @@ async def manual_trigger(request: Request, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     logger.info("Manual full-sweep trigger received.")
-    background_tasks.add_task(_run_bg, "manual", run_full_sweep)
+    background_tasks.add_task(_run_bg, "manual", run_full_sweep, report_to_linear=True)
     return JSONResponse({"status": "sweep started"}, status_code=202)
 
 
@@ -233,6 +241,12 @@ def main():
     if args.sweep:
         summary = run_full_sweep()
         logger.info("cron sweep done: %s", summary)
+        # NOTE: this is the actual 2-hourly production path (deploy/eoxs-sweep.timer
+        # runs `python -m ingestion.server --sweep` directly, not through the FastAPI
+        # app) -- previously it only logged via Python logging and never called
+        # log_run/report_full_sweep at all, so ingest_log/EDB never saw these runs.
+        log_run("cron", summary)
+        report_full_sweep(summary)
         return
 
     import uvicorn
