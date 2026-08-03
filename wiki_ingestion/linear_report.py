@@ -78,6 +78,13 @@ def _build_cycle_report(result):
 
 
 def report_cycle(result):
+    """Skips reporting for a no-op cycle (nothing changed since last
+    detection) -- matches detect.run_detection's own "no empty partitions
+    on the board" philosophy. Real, informative failures still get
+    reported: a cycle with batches_failed>0 always has batches_total>0."""
+    if not result.get("batches_total"):
+        logger.info("Cycle %s: no partitions had changes -- skipping Linear report", result.get("cycle_id"))
+        return
     _safe_report(_build_cycle_report, result)
 
 
@@ -99,6 +106,9 @@ def _build_consolidation_report(result):
 
 
 def report_consolidation(result):
+    if not result.get("groups_total"):
+        logger.info("Consolidation: no duplicate groups -- skipping Linear report")
+        return
     _safe_report(_build_consolidation_report, result)
 
 
@@ -135,6 +145,9 @@ def _build_review_report(result):
 
 
 def report_review(result):
+    if not result.get("drafts_total"):
+        logger.info("Review sweep: no draft pages -- skipping Linear report")
+        return
     _safe_report(_build_review_report, result)
 
 
@@ -154,4 +167,7 @@ def _build_promotion_report(result):
 
 
 def report_promotion(result):
+    if not result.get("attempted"):
+        logger.info("Promotion: nothing to promote -- skipping Linear report")
+        return
     _safe_report(_build_promotion_report, result)

@@ -1,0 +1,22 @@
+[Unit]
+Description=eoxs-wiki-db wiki-ingestion pipeline (detect+ingest -> consolidate -> review)
+After=network.target postgresql.service eoxs-ingestion.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+# Unlike eoxs-sweep.service (raw ingestion, typically done in well under a
+# minute), this pipeline runs real `claude -p` sub-agent calls sequentially --
+# a single batch alone has taken 3-5+ minutes in testing, and a full run can
+# span hours. Type=oneshot is still subject to systemd's TimeoutStartSec
+# (commonly a 90s default) unless overridden -- without this, systemd would
+# kill the process mid-run long before it could finish.
+TimeoutStartSec=infinity
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/eoxs-wiki-db
+EnvironmentFile=/home/deploy/eoxs-wiki-db/.env
+ExecStart=/home/deploy/eoxs-wiki-db/.venv/bin/python3 -m wiki_ingestion.run_pipeline
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eoxs-wiki-pipeline

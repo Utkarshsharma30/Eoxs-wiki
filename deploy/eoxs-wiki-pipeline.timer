@@ -1,0 +1,10 @@
+[Unit]
+Description=Run eoxs-wiki-pipeline every 6 hours (Phase 3->4->5: detect+ingest, consolidate, review)
+
+[Timer]
+OnCalendar=00/6:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
