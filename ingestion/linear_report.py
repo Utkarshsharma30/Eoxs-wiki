@@ -101,8 +101,17 @@ def _rows(result):
                 label = f"{source} ({sub})"
                 if isinstance(subval, dict) and "written" in subval:
                     rows.append((label, table, subval.get("written") or 0, subval.get("error") or 0, subval))
+                elif isinstance(subval, (int, float)):
+                    # odoo's per-client result is a bare row count, not a {"written":...}
+                    # dict (see odoo_fetcher.process_client) -- a real number here means success.
+                    rows.append((label, table, subval, 0, subval))
+                elif subval is None:
+                    # odoo_fetcher.process_all sets this on a real per-client exception.
+                    rows.append((label, table, 0, 1, {"error": "exception -- see server logs"}))
                 else:
                     rows.append((label, table, 0, 1, {"error": str(subval)}))
+        elif isinstance(val, (int, float)):
+            rows.append((source, table, val, 0, val))
         else:
             rows.append((source, table, 0, 1, {"error": str(val)}))
     return rows
