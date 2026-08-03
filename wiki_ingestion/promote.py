@@ -18,6 +18,7 @@ import json
 from datetime import date
 
 from ingestion.db import get_live_conn
+from wiki_ingestion.linear_report import report_promotion
 
 
 def _fetch_reviewed(conn, staging_page_id):
@@ -156,12 +157,14 @@ def promote_reviewed_pages():
     results = [promote_page(i) for i in ids]
     newly_resolved_links = _reresolve_unresolved_links()
 
-    return {
+    result = {
         "attempted": len(ids),
         "succeeded": sum(1 for r in results if "error" not in r),
         "failed": [r for r in results if "error" in r],
         "newly_resolved_links": newly_resolved_links,
     }
+    report_promotion(result)
+    return result
 
 
 if __name__ == "__main__":

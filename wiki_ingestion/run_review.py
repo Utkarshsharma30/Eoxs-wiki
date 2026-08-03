@@ -14,6 +14,7 @@ import json
 
 from wiki_ingestion.review import chunk_rows, find_draft_pages
 from wiki_ingestion.headless_agent import run_headless_agent
+from wiki_ingestion.linear_report import report_review
 
 PROMPT_TEMPLATE = """You are a wiki-review sub-agent for eoxs-wiki-db, EOXS's second-brain database.
 
@@ -77,12 +78,14 @@ def run_review_sweep(timeout_seconds=1200):
             entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
         results.append(entry)
 
-    return {
+    result = {
         "drafts_total": len(rows),
         "chunks_total": len(chunks),
         "chunks_failed": sum(1 for r in results if not r["ok"]),
         "results": results,
     }
+    report_review(result)
+    return result
 
 
 if __name__ == "__main__":

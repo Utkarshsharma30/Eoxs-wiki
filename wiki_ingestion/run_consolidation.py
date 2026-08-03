@@ -13,6 +13,7 @@ import json
 
 from wiki_ingestion.consolidate import find_duplicate_groups
 from wiki_ingestion.headless_agent import run_headless_agent
+from wiki_ingestion.linear_report import report_consolidation
 
 PROMPT_TEMPLATE = """You are a wiki-consolidation sub-agent for eoxs-wiki-db, EOXS's second-brain database.
 
@@ -62,11 +63,13 @@ def run_consolidation_pass(timeout_seconds=900):
         if not result["ok"]:
             entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
         results.append(entry)
-    return {
+    result = {
         "groups_total": len(groups),
         "groups_failed": sum(1 for r in results if not r["ok"]),
         "results": results,
     }
+    report_consolidation(result)
+    return result
 
 
 if __name__ == "__main__":

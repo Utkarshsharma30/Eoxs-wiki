@@ -24,6 +24,7 @@ import json
 from ingestion.db import get_live_conn
 from wiki_ingestion.detect import build_all_candidates, run_detection
 from wiki_ingestion.run_agent import run_agent
+from wiki_ingestion.linear_report import report_cycle
 
 # Rows per sub-agent call. Chosen to keep each call's candidate list (and
 # the resulting need to pull full context on each via read tools) small
@@ -121,7 +122,9 @@ def run_cycle(advance_cursors=True, timeout_seconds=1200):
     }
     cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(batches) and batches else "done"
     _finish_cycle(cycle_id, cycle_status, summary)
-    return {"cycle_id": cycle_id, "status": cycle_status, **summary}
+    result = {"cycle_id": cycle_id, "status": cycle_status, **summary}
+    report_cycle(result)
+    return result
 
 
 def _reap_orphaned_batches(cycle_id):
@@ -236,7 +239,9 @@ def resume_cycle(cycle_id, timeout_seconds=1200):
     }
     cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(all_batches) and all_batches else "done"
     _finish_cycle(cycle_id, cycle_status, summary)
-    return {"cycle_id": cycle_id, "status": cycle_status, **summary}
+    result = {"cycle_id": cycle_id, "status": cycle_status, **summary}
+    report_cycle(result)
+    return result
 
 
 if __name__ == "__main__":
