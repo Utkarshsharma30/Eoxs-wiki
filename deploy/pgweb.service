@@ -1,0 +1,28 @@
+[Unit]
+Description=eoxs-wiki-db read-only database browser (pgweb)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/eoxs-wiki-db
+EnvironmentFile=/home/deploy/eoxs-wiki-db/.env
+# Two independent layers of read-only enforcement, on top of nginx basic
+# auth in front of this entirely (see nginx-https.conf's /dbadmin/ location):
+# 1. eoxs_readonly is a dedicated Postgres role with SELECT-only grants --
+#    even a raw SQL query typed into pgweb's query box cannot INSERT/UPDATE/
+#    DELETE, this isn't just an application-level restriction.
+# 2. --readonly additionally makes pgweb itself reject mutating queries
+#    before they ever reach Postgres. --lock-session prevents connecting to
+#    any database other than the one baked into --url.
+ExecStart=/home/deploy/eoxs-wiki-db/bin/pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly:${PGWEB_DB_PASSWORD}@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin --auth-pass=${PGWEB_HTTP_PASSWORD} --prefix=/dbadmin --skip-open
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eoxs-pgweb
+
+[Install]
+WantedBy=multi-user.target
