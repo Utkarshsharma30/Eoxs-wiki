@@ -221,7 +221,7 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
     logger.info("source=%s candidate stubs=%d", SOURCE, len(stubs))
 
     client_index = load_client_index()
-    counts = {"written": 0, "skipped_stale": 0, "skipped_old": 0, "skipped_noise": 0, "error": 0}
+    counts = {"written": 0, "skipped_stale": 0, "skipped_old": 0, "skipped_noise": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
 
     for i, stub in enumerate(stubs, 1):
@@ -275,6 +275,7 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 logger.info("[dry-run] would write call %s: %r (client_id=%s)",
                             external_id, detail.get("title"), client_id)
                 counts["written"] += 1
+                counts["written_items"].append(detail.get("title") or "(untitled)")
                 continue
 
             dual_write(
@@ -292,6 +293,7 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 transcript_body=transcript_body, segments=segments,
             )
             counts["written"] += 1
+            counts["written_items"].append(detail.get("title") or "(untitled)")
 
         except Exception as e:
             logger.error("call %s failed: %s", stub.get("id"), e)

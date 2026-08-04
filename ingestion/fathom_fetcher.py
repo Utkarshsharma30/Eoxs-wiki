@@ -204,7 +204,7 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
     meetings = fetch_all_meetings(api_key, created_after=created_after, limit_override=limit)
     logger.info("source=%s candidate meetings=%d", SOURCE, len(meetings))
 
-    counts = {"written": 0, "skipped_stale": 0, "skipped_old": 0, "skipped_noise": 0, "error": 0}
+    counts = {"written": 0, "skipped_stale": 0, "skipped_old": 0, "skipped_noise": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
 
     for meeting in meetings:
@@ -247,6 +247,7 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             if dry_run:
                 logger.info("[dry-run] would write call %s: %r", recording_id, meeting.get("title"))
                 counts["written"] += 1
+                counts["written_items"].append(meeting.get("title") or "(untitled)")
                 continue
 
             dual_write(
@@ -263,6 +264,7 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 transcript_body=transcript_body, segments=segments,
             )
             counts["written"] += 1
+            counts["written_items"].append(meeting.get("title") or "(untitled)")
 
         except Exception as e:
             logger.error("call %s failed: %s", recording_id, e)

@@ -141,7 +141,7 @@ def process_tickets(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
     tasks = client.search_read("project.task", domain, TASK_FIELDS, order="id asc", limit=limit)
     logger.info("source=%s candidate tickets=%d", SOURCE, len(tasks))
 
-    counts = {"written": 0, "error": 0}
+    counts = {"written": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
 
     if not tasks:
@@ -180,10 +180,12 @@ def process_tickets(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             if dry_run:
                 logger.info("[dry-run] would write ticket %s: %r", record["ticket_number"], record["subject"])
                 counts["written"] += 1
+                counts["written_items"].append(f"{record['ticket_number']}: {record['subject']}")
                 continue
 
             dual_write(write_ticket, **record)
             counts["written"] += 1
+            counts["written_items"].append(f"{record['ticket_number']}: {record['subject']}")
 
         except Exception as e:
             logger.error("ticket odoo_id=%s failed: %s", task.get("id"), e)

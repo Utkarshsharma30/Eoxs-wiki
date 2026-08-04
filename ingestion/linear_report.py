@@ -24,7 +24,6 @@ import os
 
 import httpx
 
-from ingestion.db import get_live_conn
 from ingestion.state import now_utc
 
 logger = logging.getLogger("ingestion.linear_report")
@@ -44,10 +43,9 @@ SOURCE_TABLES = {
     "tickets": "tickets, ticket_events, ticket_attachments",
 }
 
-# How many hits ago (report_full_sweep's window_minutes) counts as "part of
-# this run" for listing actual item names -- generous vs. observed sweep
-# runtimes (typically 1-3 min) without needing to thread an exact start
-# timestamp through every call site.
+# Cap on how many item names to list per source in a report -- the fetchers'
+# written_items lists (see below) can be arbitrarily long, don't want a
+# single Linear issue body to balloon.
 ITEMS_PER_SOURCE_LIMIT = 10
 
 _team_id_cache = {}
@@ -118,39 +116,31 @@ def _create_issue(title, description, state_name=None):
     return data["data"]["issueCreate"]
 
 
-def _recent_items(table, extra_where, params, name_col):
-    """Real item names/subjects for 'what actually landed', queried fresh
-    from the DB rather than carried through the fetchers' return values
-    (which are just counts) -- avoids changing every fetcher's contract."""
-    conn = get_live_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT {name_col} AS name FROM {table} WHERE updated_at >= now() - interval '20 minutes' {extra_where} "
-                f"ORDER BY updated_at DESC LIMIT {ITEMS_PER_SOURCE_LIMIT + 1}",
-                params,
-            )
-            rows = [r["name"] for r in cur.fetchall()]
-        truncated = len(rows) > ITEMS_PER_SOURCE_LIMIT
-        return rows[:ITEMS_PER_SOURCE_LIMIT], truncated
-    finally:
-        conn.close()
+def _items_for(detail):
+    """detail: the fetcher's own per-source/per-account result dict, which
+    now carries a written_items list of exactly what it wrote (real names,
+    not a guess). Returns (items, truncated).
 
+    This used to run a fresh DB query filtered by "updated_at within the
+    last 20 minutes" -- found live to be wrong: after a bulk operation
+    touches updated_at on tens of thousands of unrelated rows (a historical
+    backfill, a data-fix reload), EVERY report for the next 20+ minutes
+    picks up that stale pool instead of what this run actually wrote,
+    since the query has no way to distinguish "recently touched for any
+    reason" from "written by this specific fetcher call." Reading
+    written_items directly is exact by construction -- no time window,
+    no guessing, no dependency on nothing else having touched the table
+    recently.
 
-def _items_for(source, sub):
-    """sub: the per-account (gmail) / per-source (fireflies/fathom) / plain
-    (zoho/tickets) key, or None for odoo (see below). Returns
-    (items, truncated) or (None, False) if this source/sub has no
-    meaningful "recent items" concept."""
-    if source == "gmail":
-        return _recent_items("email_threads", "AND source_account = %s", (sub,), "subject")
-    if source == "zoho":
-        return _recent_items("email_threads", "AND source_account = 'support_zoho'", (), "subject")
-    if source in ("fireflies", "fathom"):
-        return _recent_items("call_transcripts", "AND source = %s", (source,), "meeting_title")
-    if source == "tickets":
-        return _recent_items("tickets", "", (), "ticket_number || ': ' || subject")
-    return None, False  # odoo: full client refresh every run, "new items" isn't a meaningful concept here
+    detail isn't always a dict -- odoo's per-client result is a bare int
+    or None (see _rows), and it has no written_items concept at all (full
+    refresh every run, not incremental writes -- see the note appended in
+    _format_body)."""
+    if not isinstance(detail, dict):
+        return [], False
+    items = detail.get("written_items") or []
+    truncated = len(items) > ITEMS_PER_SOURCE_LIMIT
+    return items[:ITEMS_PER_SOURCE_LIMIT], truncated
 
 
 def _rows(result):
@@ -201,10 +191,10 @@ def _format_body(result, run_at):
     lines += ["", f"**Total new rows: {total_written}**" + (f"  ⚠️ {total_errors} source(s) with errors" if total_errors else "")]
 
     item_sections = []
-    for source, sub, label, table, written, error, _ in rows:
+    for source, sub, label, table, written, error, detail in rows:
         if not written:
             continue
-        items, truncated = _items_for(source, sub)
+        items, truncated = _items_for(detail)
         if items:
             item_sections.append(f"**{label}** ({written} written):\n" + "\n".join(f"- {i}" for i in items) + (f"\n- _...and {written - ITEMS_PER_SOURCE_LIMIT} more_" if truncated else ""))
     if item_sections:

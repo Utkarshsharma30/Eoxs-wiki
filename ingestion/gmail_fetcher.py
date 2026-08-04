@@ -238,7 +238,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
     thread_ids = fetch_thread_ids(service, query, limit)
     logger.info("account=%s candidate threads=%d", account, len(thread_ids))
 
-    counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0}
+    counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
     client_index = load_client_index()
 
@@ -271,6 +271,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 logger.info("[dry-run] would write thread %s: %r (%d messages)",
                             tid, detail["subject"], detail["message_count"])
                 counts["written"] += 1
+                counts["written_items"].append(detail["subject"])
                 continue
 
             dual_write(
@@ -285,6 +286,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             )
             mark_messages_seen(detail["message_ids"], account)
             counts["written"] += 1
+            counts["written_items"].append(detail["subject"])
 
         except Exception as e:
             logger.error("thread %s failed: %s", tid, e)

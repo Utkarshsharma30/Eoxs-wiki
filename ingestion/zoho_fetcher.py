@@ -187,7 +187,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
     thread_groups = build_thread_groups(messages)
     logger.info("source=%s candidate threads=%d", SOURCE, len(thread_groups))
 
-    counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0}
+    counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
     client_index = load_client_index()
 
@@ -255,6 +255,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 logger.info("[dry-run] would write thread %s: %r (%d messages)",
                             thread_id, subject, len(msgs))
                 counts["written"] += 1
+                counts["written_items"].append(subject)
                 continue
 
             dual_write(
@@ -271,6 +272,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             )
             mark_messages_seen(message_ids, SOURCE)
             counts["written"] += 1
+            counts["written_items"].append(subject)
 
         except Exception as e:
             logger.error("thread %s failed: %s", thread_id, e)
