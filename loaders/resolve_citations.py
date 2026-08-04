@@ -40,10 +40,14 @@ def main():
         cur.execute("SELECT id, ticket_number FROM tickets")
         ticket_by_number = {num.lower(): tid for tid, num in cur.fetchall()}
 
-        cur.execute("SELECT id, source_file_path FROM call_transcripts")
+        # source_file_path is NULL for every live-API-ingested row (Gmail/Zoho/Fireflies/
+        # Fathom fetchers never set it -- only this file-based loader does) -- filtered out
+        # here since a filename-stem match is only meaningful for file-backed rows anyway;
+        # an API-ingested row has no filename for a citation's free-text slug to match against.
+        cur.execute("SELECT id, source_file_path FROM call_transcripts WHERE source_file_path IS NOT NULL")
         call_by_stem = {Path(p).stem.lower(): cid for cid, p in cur.fetchall()}
 
-        cur.execute("SELECT id, source_file_path FROM email_threads")
+        cur.execute("SELECT id, source_file_path FROM email_threads WHERE source_file_path IS NOT NULL")
         email_by_stem = {Path(p).stem.lower(): eid for eid, p in cur.fetchall()}
 
         cur.execute("SELECT id, wiki_page_id, source_ref_raw FROM wiki_citations")

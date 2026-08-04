@@ -76,46 +76,81 @@ def load_file(conn, path, client_slug=None):
     client_id = get_client_id(conn, client_slug)
 
     with conn.cursor() as cur:
+        # Reconcile against an already-live-API-ingested row for this exact same real
+        # call (source_file_path IS NULL there -- see schema/013's partial unique index,
+        # added specifically because API-ingested rows can't dedup against each other via
+        # the base (source, external_id, source_file_path) constraint) BEFORE falling back
+        # to the file-path-keyed upsert below. Without this, a historical loader row and an
+        # already-ingested API row for the same real call would become two separate rows,
+        # since neither NULL vs. a real path collides under any unique constraint.
         cur.execute(
-            """
-            INSERT INTO call_transcripts (
-                source, external_id, meeting_title, call_date, duration_seconds,
-                duration_human, host_email, participants, recording_url,
-                fireflies_summary, key_topics, action_items, tags,
-                generated_at, generated_hash, transcript_body, client_id,
-                source_file_path, source_file_mtime
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (source_file_path) DO UPDATE SET
-                meeting_title = EXCLUDED.meeting_title,
-                call_date = EXCLUDED.call_date,
-                duration_seconds = EXCLUDED.duration_seconds,
-                duration_human = EXCLUDED.duration_human,
-                host_email = EXCLUDED.host_email,
-                participants = EXCLUDED.participants,
-                recording_url = EXCLUDED.recording_url,
-                fireflies_summary = EXCLUDED.fireflies_summary,
-                key_topics = EXCLUDED.key_topics,
-                action_items = EXCLUDED.action_items,
-                tags = EXCLUDED.tags,
-                generated_at = EXCLUDED.generated_at,
-                generated_hash = EXCLUDED.generated_hash,
-                transcript_body = EXCLUDED.transcript_body,
-                client_id = EXCLUDED.client_id,
-                source_file_mtime = EXCLUDED.source_file_mtime,
-                updated_at = now()
-            RETURNING id
-            """,
-            (
-                source, str(external_id), meta.get("meeting_title"), to_date(meta.get("date")),
-                meta.get("duration_seconds"), meta.get("duration"), meta.get("host_email"),
-                to_str_list(meta.get("participants")), meta.get("recording_url"),
-                meta.get("fireflies_summary"), to_str_list(meta.get("key_topics")),
-                to_str_list(meta.get("action_items")), to_str_list(meta.get("tags")),
-                to_dt(meta.get("generated_at")), meta.get("generated_hash"),
-                transcript, client_id, rel_path, mtime,
-            ),
+            "SELECT id FROM call_transcripts WHERE source = %s AND external_id = %s AND source_file_path IS NULL",
+            (source, str(external_id)),
         )
-        call_id = cur.fetchone()[0]
+        api_row = cur.fetchone()
+
+        if api_row:
+            call_id = api_row[0]
+            cur.execute(
+                """
+                UPDATE call_transcripts SET
+                    meeting_title = %s, call_date = %s, duration_seconds = %s, duration_human = %s,
+                    host_email = %s, participants = %s, recording_url = %s, fireflies_summary = %s,
+                    key_topics = %s, action_items = %s, tags = %s, generated_at = %s, generated_hash = %s,
+                    transcript_body = %s, client_id = COALESCE(client_id, %s),
+                    source_file_path = %s, source_file_mtime = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    meta.get("meeting_title"), to_date(meta.get("date")), meta.get("duration_seconds"),
+                    meta.get("duration"), meta.get("host_email"), to_str_list(meta.get("participants")),
+                    meta.get("recording_url"), meta.get("fireflies_summary"), to_str_list(meta.get("key_topics")),
+                    to_str_list(meta.get("action_items")), to_str_list(meta.get("tags")),
+                    to_dt(meta.get("generated_at")), meta.get("generated_hash"), transcript, client_id,
+                    rel_path, mtime, call_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO call_transcripts (
+                    source, external_id, meeting_title, call_date, duration_seconds,
+                    duration_human, host_email, participants, recording_url,
+                    fireflies_summary, key_topics, action_items, tags,
+                    generated_at, generated_hash, transcript_body, client_id,
+                    source_file_path, source_file_mtime
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (source_file_path) DO UPDATE SET
+                    meeting_title = EXCLUDED.meeting_title,
+                    call_date = EXCLUDED.call_date,
+                    duration_seconds = EXCLUDED.duration_seconds,
+                    duration_human = EXCLUDED.duration_human,
+                    host_email = EXCLUDED.host_email,
+                    participants = EXCLUDED.participants,
+                    recording_url = EXCLUDED.recording_url,
+                    fireflies_summary = EXCLUDED.fireflies_summary,
+                    key_topics = EXCLUDED.key_topics,
+                    action_items = EXCLUDED.action_items,
+                    tags = EXCLUDED.tags,
+                    generated_at = EXCLUDED.generated_at,
+                    generated_hash = EXCLUDED.generated_hash,
+                    transcript_body = EXCLUDED.transcript_body,
+                    client_id = EXCLUDED.client_id,
+                    source_file_mtime = EXCLUDED.source_file_mtime,
+                    updated_at = now()
+                RETURNING id
+                """,
+                (
+                    source, str(external_id), meta.get("meeting_title"), to_date(meta.get("date")),
+                    meta.get("duration_seconds"), meta.get("duration"), meta.get("host_email"),
+                    to_str_list(meta.get("participants")), meta.get("recording_url"),
+                    meta.get("fireflies_summary"), to_str_list(meta.get("key_topics")),
+                    to_str_list(meta.get("action_items")), to_str_list(meta.get("tags")),
+                    to_dt(meta.get("generated_at")), meta.get("generated_hash"),
+                    transcript, client_id, rel_path, mtime,
+                ),
+            )
+            call_id = cur.fetchone()[0]
 
         cur.execute("DELETE FROM call_segments WHERE call_id = %s", (call_id,))
         for seg in segments:

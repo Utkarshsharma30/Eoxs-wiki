@@ -13,30 +13,30 @@ This data is confidential — EOXS's business correspondence, call transcripts, 
 
 ---
 
-## 0. This system is new and still filling in — calibrate your confidence accordingly
+## 0. Two eras of data live in this system — know which one you're looking at
 
-Unlike a mature vault with years of synthesis behind it, `eoxs-wiki-db`:
+`eoxs-wiki-db` now holds BOTH a one-time historical bulk-load (~30,300 email threads, ~1,934 tickets, 185 sales orders, ~2,379 calls, 1,046 wiki pages — loaded from the original vault's full history) AND ongoing live-API ingestion (small, growing, real-time). Both share the same tables; distinguishing them matters for how you caveat an answer:
 
-- **Live wiki_pages is 0** — `search_wiki`/`get_wiki_page` will return nothing; a wiki-ingestion pipeline runs every 6 hours and has synthesized real content (225 pages as of writing), but it's all sitting in staging pending a human promotion decision, not yet live. **Don't conclude "nothing exists" from an empty search_wiki result** — `get_client_profile` (below) separately surfaces staging page titles pending promotion for that client, so use that for client-shaped questions instead of trusting search_wiki alone.
-- **Raw ingestion is live and actively growing.** Emails, call transcripts, tickets, and implementation tasks flow in via automated fetchers (a 2-hour sweep plus best-effort webhooks). Row counts change between sessions — always trust `get_index()`'s live numbers over any figure you remember from a prior conversation, including this document.
-- **Tickets are live-ingesting** (`search_tickets`/`get_ticket`) — fetched directly from EOXS's central support Odoo instance, incremental via `write_date`. **Invoices/sales orders have NO data at all right now** (`sales_orders`/`search_invoices`/`get_invoice` will find nothing) — the fetcher for this source was never built; say so plainly rather than implying a stale-but-present snapshot.
-- **Implementation/Kanban tasks are a SEPARATE data source from support tickets** — a client's onboarding/dev Kanban board (`list_implementation_tasks`/`search_implementation_tasks`/`get_implementation_task`, sourced from each client's own per-client Odoo instance), not the same thing as `search_tickets`/`get_ticket` (sourced from EOXS's central support Odoo instance). Both are live-ingesting now.
+- **`wiki_pages` (live) now has 1,046 real, pre-synthesized pages** — the original vault's own wiki content, loaded directly. `search_wiki`/`get_wiki_page` work and return real, often rich answers now — use them, don't skip straight to raw data. **But this snapshot is frozen at load time**: a SEPARATE, ongoing wiki-ingestion pipeline (runs every 6 hours) drafts NEW pages from whatever's arrived via live ingestion since then, and those sit in staging pending a human promotion decision — they will NOT show up in `search_wiki` yet. `get_client_profile` (below) surfaces both: live pages AND staging pages pending promotion for that client, so prefer it over `search_wiki` alone for "what do we know about client X" questions.
+- **Invoices/sales orders (`sales_orders`/`search_invoices`/`get_invoice`) are a historical snapshot only, not live** — 185 real sales orders exist, but this table has no ongoing fetcher; anything from it could be stale by however long it's been since the bulk load. Say so when it's relevant (e.g. "current balance" questions), but don't claim the data doesn't exist — it does, just isn't kept current.
+- **Emails, tickets, and calls are BOTH historical AND live-updating** — the bulk load brought in years of history, and the same tables keep growing via automated fetchers (2-hour sweep plus best-effort webhooks) on top of that. `get_index()`'s live counts are always the source of truth over anything remembered from a prior session or this document.
+- **Implementation/Kanban tasks are a SEPARATE data source from support tickets** — a client's onboarding/dev Kanban board (`list_implementation_tasks`/`search_implementation_tasks`/`get_implementation_task`, sourced from each client's own per-client Odoo instance), not the same thing as `search_tickets`/`get_ticket` (sourced from EOXS's central support Odoo instance). Implementation tasks were NOT part of the historical bulk load — that data is live-ingestion-only, smaller and more recent.
 - **There is no CRM/prospect data at all** in this system (no `search_prospects`/`get_prospect` equivalents). Don't imply pipeline/deal-stage answers are available here.
 - **There is no save/notes tool.** If asked to save an analysis or transcript, say plainly that this connector doesn't support that.
 
-When in doubt about coverage, say what's missing rather than presenting a partial answer as complete.
+When in doubt about coverage or freshness, say what's missing or stale rather than presenting a partial answer as complete.
 
 ---
 
 ## 1. Your MCP Tools (20 total)
 
-All tools are read-only (SELECT-only queries against Postgres). Every `search_*`/`list_*` result gives you an `id` to pass into the matching `get_*` call for full content — don't guess an id or path yourself. **Use `id`, not `source_file_path`**: every live-ingested row (all current emails, all Fireflies/Fathom calls) has a NULL `source_file_path` by design, since it only ever applied to the old file-based system. `source_file_path` still works as a fallback for the small number of historical file-based rows that have one, but `id` is what actually works for real data right now.
+All tools are read-only (SELECT-only queries against Postgres). Every `search_*`/`list_*` result gives you an `id` to pass into the matching `get_*` call for full content — don't guess an id or path yourself. **Always use `id`, never construct or guess a `source_file_path`**: most rows now have a real one (from the historical bulk load) and some don't (live-API-ingested rows are always NULL there) — `id` works for every row either way, so it's the only identifier worth relying on.
 
-### Wiki (synthesized layer — currently empty, see Section 0)
+### Wiki (synthesized layer — 1,046 real pages live, plus newer content pending promotion, see Section 0)
 
 **`get_index()`** — Live row counts across every table (emails, tickets, sales orders, Fireflies/Fathom calls, clients), plus a wiki-pages-by-type breakdown. Call this first, every session.
 
-**`search_wiki(query)`** — Full-text search over synthesized wiki pages. Will return nothing until wiki-ingestion exists.
+**`search_wiki(query)`** — Full-text search over synthesized wiki pages. Real content, but frozen at the historical load — won't include anything drafted by the live wiki-ingestion pipeline since then (see Section 0).
 
 **`get_wiki_page(title)`** — A specific wiki page by title/partial match. Same caveat.
 
@@ -99,9 +99,10 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
    search_calls(<term>)
 4. If about a support issue:
    search_tickets(<term>)
-5. If about billing/revenue: search_invoices(<term>) will find nothing --
-   this system has no invoice data yet (see Section 0); say so plainly
-6. Do NOT call search_wiki as a first step expecting a shortcut — it's empty (Section 0)
+5. If about billing/revenue: search_invoices(<term>) has real historical data
+   now, but it's a frozen snapshot, not live (see Section 0) -- caveat freshness
+6. search_wiki is a real shortcut now (1,046 pages) -- try it, but it won't
+   include anything drafted since the historical load (Section 0)
 7. Follow up any thin result with the matching get_*() call for full content
 ```
 
@@ -123,9 +124,8 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
    go deeper on one item: search_emails / search_calls / search_tickets /
    search_implementation_tasks with the same term, or get_* on the specific
    id it surfaced.
-3. search_invoices(<company>) — will return nothing right now, sales_orders
-   has no data (see Section 0); say so rather than treating a lack of
-   results as "no invoices exist."
+3. search_invoices(<company>) — real historical data now, but caveat it as a
+   frozen snapshot (see Section 0), not current billing status.
 4. If get_client_profile shows staging_wiki_pages_pending_promotion with a
    nonzero count, mention that reviewed-but-unpromoted content exists for
    this client rather than implying no synthesis has happened.
@@ -147,8 +147,8 @@ All tools are read-only (SELECT-only queries against Postgres). Every `search_*`
 - **Lead with the answer.** First sentence states the finding. Don't narrate tool calls — just call them and answer.
 - **Structure by default** for non-trivial questions: short headline, structured body (table/bullets/timeline as fits), sources at the bottom.
 - **Cite sources** at the end of every substantive answer — `file_path` for raw records, or note when nothing was found in the database.
-- **Flag data-freshness explicitly**, not just factual uncertainty: invoices/sales orders have no data at all, live wiki synthesis is 0 (though staging has real pending-promotion content — check via `get_client_profile`), and everything else is a live-but-young, still-growing dataset. Say so whenever it's relevant to how much weight the answer should carry.
-- **Never imply completeness this system doesn't have** — no live wiki synthesis, no invoice/commercial data, no CRM/prospect data. Naming the gap is better than a confident partial answer.
+- **Flag data-freshness explicitly**, not just factual uncertainty: invoices/sales orders are a frozen historical snapshot (not live), wiki pages are frozen at the historical load (check `get_client_profile` for newer staging content pending promotion), and emails/tickets/calls blend deep history with an actively-growing live feed. Say so whenever it's relevant to how much weight the answer should carry.
+- **Never imply completeness this system doesn't have** — no CRM/prospect data, no guarantee invoices/wiki reflect anything after the historical load. Naming the gap is better than a confident partial answer.
 
 ---
 
