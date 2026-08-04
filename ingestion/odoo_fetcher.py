@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import set_last_synced_at, now_utc
-from ingestion.write_implementation import write_client_tasks
+from ingestion.write_implementation import write_client_tasks, mark_tasks_inactive
 from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -304,6 +304,10 @@ def process_client(cfg, *, dry_run=False):
     if not tasks:
         if not dry_run:
             dual_write(write_client_tasks, client_id=client_id, tasks=[])
+            # write_client_tasks(tasks=[]) is now a no-op upsert (nothing to upsert) --
+            # unlike the old full-wipe behavior, it does NOT clear existing tasks on its
+            # own, so this client reporting zero tasks needs the reconciliation pass too.
+            dual_write(mark_tasks_inactive, client_id=client_id, seen_odoo_task_ids=[])
             set_last_synced_at(f"odoo_{cfg['id']}", now_utc())
         return 0
 
@@ -334,8 +338,10 @@ def process_client(cfg, *, dry_run=False):
         return len(task_records)
 
     written = dual_write(write_client_tasks, client_id=client_id, tasks=task_records)
+    seen_ids = [t["odoo_task_id"] for t in task_records]
+    deactivated = dual_write(mark_tasks_inactive, client_id=client_id, seen_odoo_task_ids=seen_ids)
     set_last_synced_at(f"odoo_{cfg['id']}", now_utc())
-    logger.info("client=%s wrote %d tasks", cfg["id"], written)
+    logger.info("client=%s wrote %d tasks, deactivated %d no-longer-present tasks", cfg["id"], written, deactivated)
     return written
 
 
