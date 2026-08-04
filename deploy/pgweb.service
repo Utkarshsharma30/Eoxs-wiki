@@ -17,7 +17,14 @@ EnvironmentFile=/home/deploy/eoxs-wiki-db/.env
 # 2. --readonly additionally makes pgweb itself reject mutating queries
 #    before they ever reach Postgres. --lock-session prevents connecting to
 #    any database other than the one baked into --url.
-ExecStart=/home/deploy/eoxs-wiki-db/bin/pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly:${PGWEB_DB_PASSWORD}@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin --auth-pass=${PGWEB_HTTP_PASSWORD} --prefix=/dbadmin --skip-open
+#
+# No --prefix here on purpose: pgweb v0.17.0's --prefix flag registers its
+# API routes under the prefix correctly (verified: /dbadmin/api/info) but
+# NOT its static index/SPA route (verified: /dbadmin/ 404s, plain / 200s
+# with no prefix set) -- a real version limitation, found live. nginx
+# strips the /dbadmin/ prefix before proxying instead (see nginx-https.conf),
+# so pgweb only ever sees requests at its own root.
+ExecStart=/home/deploy/eoxs-wiki-db/bin/pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly:${PGWEB_DB_PASSWORD}@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin --auth-pass=${PGWEB_HTTP_PASSWORD} --skip-open
 Restart=always
 RestartSec=5
 StandardOutput=journal
