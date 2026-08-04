@@ -28,6 +28,7 @@ from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
 from ingestion.write_email import write_thread, existing_message_count
+from ingestion.routing import load_client_index, classify_client
 from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -239,6 +240,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
 
     counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0}
     run_started_at = now_utc()
+    client_index = load_client_index()
 
     for tid in thread_ids:
         try:
@@ -279,6 +281,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 thread_dates=detail["thread_dates"], tags=["email", account],
                 is_quarantined=False, generated_at=now_utc(), messages=detail["messages"],
                 attachments_by_message_index=detail["attachments_by_message_index"],
+                client_id=classify_client(client_index, detail["participants"]),
             )
             mark_messages_seen(detail["message_ids"], account)
             counts["written"] += 1

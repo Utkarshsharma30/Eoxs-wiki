@@ -226,6 +226,95 @@ def list_clients():
     return db_query("SELECT id, slug, display_name, domains, odoo_base_url FROM clients ORDER BY display_name")
 
 
+def list_contacts(client=""):
+    sql = """
+        SELECT c.name, c.email, c.is_relay_inbox, cl.slug AS client
+        FROM contacts c JOIN clients cl ON cl.id = c.client_id
+        WHERE 1=1
+    """
+    params = []
+    if client:
+        sql += " AND cl.slug = %s"
+        params.append(client)
+    sql += " ORDER BY cl.display_name, c.name"
+    return db_query(sql, params)
+
+
+def get_client_profile(client):
+    """Aggregates everything linked to one client by client_id in a single
+    call -- every raw table (tickets, email_threads, call_transcripts,
+    implementation_tasks, sales_orders) has a client_id column, but every
+    other tool here only searches ONE of them at a time, so answering
+    something like "give me everything on client X" required chaining 5+
+    separate tool calls with no guarantee the caller actually would. This
+    is the single-call alternative: client record, contacts, and recent-
+    activity summaries across every source, cross-linked by client_id --
+    not exhaustive detail (use get_ticket/get_email/get_call/
+    get_implementation_task for that), but enough to see the whole
+    relationship at a glance and know what to drill into.
+
+    NOTE on scope: only searches LIVE tables. Synthesized wiki content for
+    this client may exist in wiki_staging (reviewed, not yet promoted) --
+    that's flagged by staging_wiki_pages_pending_promotion below (a count
+    and titles only, not body content -- staging is not part of this
+    read-only server's live-data contract) so the caller knows to ask a
+    human to check staging or promote first, rather than concluding no
+    wiki content exists.
+    """
+    row = db_query_one("SELECT id, slug, display_name, domains, odoo_base_url, odoo_db FROM clients WHERE slug = %s", (client,))
+    if not row:
+        row = db_query_one("SELECT id, slug, display_name, domains, odoo_base_url, odoo_db FROM clients WHERE display_name ILIKE %s", (f"%{client}%",))
+    if not row:
+        return {"error": f"no client matching '{client}' -- see list_clients for valid slugs"}
+    client_id = row["id"]
+
+    row["contacts"] = db_query(
+        "SELECT name, email, is_relay_inbox FROM contacts WHERE client_id = %s ORDER BY name", (client_id,)
+    )
+    row["tickets"] = db_query(
+        """SELECT ticket_number, subject, status, priority, ticket_created
+           FROM tickets WHERE client_id = %s ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
+        (client_id,),
+    )
+    row["ticket_count"] = db_query_one("SELECT count(*) AS n FROM tickets WHERE client_id = %s", (client_id,))["n"]
+    row["implementation_tasks_recent"] = db_query(
+        """SELECT task_name, stage, owner, task_created_date
+           FROM implementation_tasks WHERE client_id = %s ORDER BY task_created_date DESC NULLS LAST LIMIT 20""",
+        (client_id,),
+    )
+    row["implementation_task_count"] = db_query_one(
+        "SELECT count(*) AS n FROM implementation_tasks WHERE client_id = %s", (client_id,)
+    )["n"]
+    row["emails_recent"] = db_query(
+        """SELECT id, source_account, subject FROM email_threads
+           WHERE client_id = %s ORDER BY id DESC LIMIT 20""",
+        (client_id,),
+    )
+    row["email_count"] = db_query_one("SELECT count(*) AS n FROM email_threads WHERE client_id = %s", (client_id,))["n"]
+    row["calls_recent"] = db_query(
+        """SELECT id, source, meeting_title, call_date FROM call_transcripts
+           WHERE client_id = %s ORDER BY call_date DESC NULLS LAST LIMIT 20""",
+        (client_id,),
+    )
+    row["call_count"] = db_query_one("SELECT count(*) AS n FROM call_transcripts WHERE client_id = %s", (client_id,))["n"]
+    row["sales_orders_count"] = db_query_one("SELECT count(*) AS n FROM sales_orders WHERE client_id = %s", (client_id,))["n"]
+
+    row["live_wiki_pages"] = db_query(
+        "SELECT title, page_type FROM wiki_pages WHERE title ILIKE %s ORDER BY title", (f"%{row['display_name']}%",)
+    )
+    staging_pending = db_query(
+        """SELECT title, page_type, status FROM wiki_staging.wiki_pages
+           WHERE title ILIKE %s AND status = 'reviewed' ORDER BY title""",
+        (f"%{row['display_name']}%",),
+    )
+    row["staging_wiki_pages_pending_promotion"] = {
+        "count": len(staging_pending),
+        "titles": [p["title"] for p in staging_pending],
+        "note": "Reviewed but not yet promoted to live wiki_pages -- ask a human to promote, or query wiki_staging directly for full content.",
+    }
+    return row
+
+
 def get_client_file(file_path):
     for table in ("tickets", "sales_orders", "call_transcripts", "wiki_pages"):
         row = db_query_one(f"SELECT * FROM {table} WHERE source_file_path = %s", (file_path,))
@@ -321,6 +410,8 @@ TOOLS = {
     "get_invoice": get_invoice,
     "search_invoices": search_invoices,
     "list_clients": list_clients,
+    "list_contacts": list_contacts,
+    "get_client_profile": get_client_profile,
     "get_client_file": get_client_file,
     "list_implementation_tasks": list_implementation_tasks,
     "search_implementation_tasks": search_implementation_tasks,
@@ -411,6 +502,22 @@ async def list_tools():
             name="list_clients",
             description="List all clients in the registry (slug, display name, domains, Odoo instance).",
             inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="list_contacts",
+            description="List known contacts (name, email) for a client, or all clients if omitted. "
+                        "client: client slug (e.g. 'sabre-alloys') or empty for all.",
+            inputSchema={"type": "object", "properties": {"client": {"type": "string", "default": ""}}},
+        ),
+        Tool(
+            name="get_client_profile",
+            description="THE tool for 'tell me everything about client X' -- aggregates the client record, "
+                        "contacts, recent tickets, recent implementation tasks, recent emails, recent calls, "
+                        "sales order count, and live+pending-promotion wiki pages, all cross-linked by client_id "
+                        "in one call. Prefer this over chaining separate search_* calls for a client overview; "
+                        "use the individual get_ticket/get_email/get_call/get_implementation_task tools to drill "
+                        "into any one item this surfaces. client: slug (e.g. 'sabre-alloys') or a display-name substring.",
+            inputSchema={"type": "object", "properties": {"client": {"type": "string"}}, "required": ["client"]},
         ),
         Tool(
             name="get_client_file",

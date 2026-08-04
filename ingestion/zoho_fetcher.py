@@ -26,6 +26,7 @@ from ingestion.db import dual_write
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
 from ingestion.write_email import write_thread, existing_message_count
+from ingestion.routing import load_client_index, classify_client
 from ingestion.db import get_live_conn
 from ingestion.retry import call_with_retry
 
@@ -188,6 +189,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
 
     counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0}
     run_started_at = now_utc()
+    client_index = load_client_index()
 
     for thread_id, msgs in thread_groups.items():
         try:
@@ -265,6 +267,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 tags=["email", SOURCE], is_quarantined=False, generated_at=now_utc(),
                 messages=msg_records,
                 attachments_by_message_index=attachments_by_message_index,
+                client_id=classify_client(client_index, participants),
             )
             mark_messages_seen(message_ids, SOURCE)
             counts["written"] += 1

@@ -10,9 +10,12 @@ from datetime import timezone
 
 def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, to_addr,
                   message_count, participants, thread_dates, tags, is_quarantined,
-                  generated_at, messages, attachments_by_message_index=None):
+                  generated_at, messages, attachments_by_message_index=None, client_id=None):
     """messages: list of dicts {message_index, message_date, from_addr, body, message_ids}
     attachments_by_message_index: dict {message_index: [{filename, relative_path, size_bytes, note}]}
+    client_id: from ingestion.routing.classify_client(index, participants), or None if no
+    participant matched a known client contact/domain -- caller's responsibility to classify,
+    this just stores the result (matches call_transcripts' existing client_id pattern).
     Returns the thread's DB id (from the live connection's perspective when
     called via dual_write; staging's return value is discarded by the caller)."""
     attachments_by_message_index = attachments_by_message_index or {}
@@ -23,8 +26,8 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
             INSERT INTO email_threads (
                 source_account, gmail_thread_id, subject, from_addr, to_addr,
                 message_count, participants, thread_dates, tags, is_quarantined,
-                generated_at, source_file_path, source_file_mtime
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
+                generated_at, client_id, source_file_path, source_file_mtime
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
             ON CONFLICT (source_account, gmail_thread_id) DO UPDATE SET
                 subject = EXCLUDED.subject,
                 from_addr = EXCLUDED.from_addr,
@@ -35,13 +38,14 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
                 tags = EXCLUDED.tags,
                 is_quarantined = EXCLUDED.is_quarantined,
                 generated_at = EXCLUDED.generated_at,
+                client_id = EXCLUDED.client_id,
                 updated_at = now()
             RETURNING id
             """,
             (
                 source_account, gmail_thread_id, subject, from_addr, to_addr,
                 message_count, participants, thread_dates, tags, is_quarantined,
-                generated_at,
+                generated_at, client_id,
             ),
         )
         thread_id = cur.fetchone()["id"]
