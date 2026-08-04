@@ -149,17 +149,24 @@ def promote_reviewed_pages():
     conn = get_live_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM wiki_staging.wiki_pages WHERE status = 'reviewed' ORDER BY id")
-            ids = [r["id"] for r in cur.fetchall()]
+            cur.execute("SELECT id, title FROM wiki_staging.wiki_pages WHERE status = 'reviewed' ORDER BY id")
+            rows = cur.fetchall()
     finally:
         conn.close()
 
-    results = [promote_page(i) for i in ids]
+    titles_by_id = {r["id"]: r["title"] for r in rows}
+    results = [promote_page(r["id"]) for r in rows]
     newly_resolved_links = _reresolve_unresolved_links()
 
+    succeeded_list = [
+        {"staging_page_id": r["staging_page_id"], "live_page_id": r["live_page_id"], "action": r["action"],
+         "title": titles_by_id.get(r["staging_page_id"])}
+        for r in results if "error" not in r
+    ]
     result = {
-        "attempted": len(ids),
-        "succeeded": sum(1 for r in results if "error" not in r),
+        "attempted": len(rows),
+        "succeeded": len(succeeded_list),
+        "succeeded_list": succeeded_list,
         "failed": [r for r in results if "error" in r],
         "newly_resolved_links": newly_resolved_links,
     }

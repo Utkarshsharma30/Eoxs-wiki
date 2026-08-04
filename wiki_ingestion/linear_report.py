@@ -29,14 +29,30 @@ def _safe_report(build_fn, *args):
     mask an otherwise-successful ingestion/consolidation/review/promotion
     run (same discipline as ingestion/linear_report.py)."""
     try:
-        title, body = build_fn(*args)
-        created = _create_issue(title, body)
+        title, body, state_name = build_fn(*args)
+        created = _create_issue(title, body, state_name=state_name)
         if not created.get("success"):
             logger.warning("Linear issueCreate returned success=false: %s", created)
         else:
             logger.info("Linear report created: %s", created["issue"]["identifier"])
     except Exception as e:
         logger.warning("Linear report failed (result unaffected): %s", e)
+
+
+def _page_titles(cycle_id):
+    """Actual page id+title+type drafted this cycle -- the content-level
+    detail (not just counts) needed to review a cycle's output the way a
+    GitHub diff shows what changed, per explicit request."""
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, title, page_type, source_kind FROM wiki_staging.wiki_pages WHERE cycle_id = %s ORDER BY id",
+                (cycle_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
 def _pages_by_source_kind(cycle_id):
@@ -73,8 +89,15 @@ def _build_cycle_report(result):
     total_pages = sum(pages.values())
     lines += ["", f"**Total staging pages drafted this cycle: {total_pages}** (landed in wiki_staging.wiki_pages)"]
 
+    page_rows = _page_titles(cycle_id)
+    if page_rows:
+        lines += ["", "---", "", "**Pages drafted this cycle (content-level detail):**", "", "| id | Title | Type | Source |", "|---|---|---|---|"]
+        for p in page_rows:
+            lines.append(f"| {p['id']} | {p['title']} | {p['page_type']} | {p['source_kind']} |")
+
     title = f"Wiki-ingestion cycle {cycle_id} — {result['status']} — {total_pages} page(s) drafted"
-    return title, "\n".join(lines)
+    state = "Todo" if result.get("batches_failed") else "Done"
+    return title, "\n".join(lines), state
 
 
 def report_cycle(result):
@@ -102,7 +125,8 @@ def _build_consolidation_report(result):
         lines.append(f"| {r['title']} | {len(r['page_ids'])} | {status} |")
 
     title = f"Wiki-ingestion consolidation — {result['groups_total']} group(s), {result['groups_failed']} failed"
-    return title, "\n".join(lines)
+    state = "Todo" if result.get("groups_failed") else "Done"
+    return title, "\n".join(lines), state
 
 
 def report_consolidation(result):
@@ -113,6 +137,8 @@ def report_consolidation(result):
 
 
 def _build_review_report(result):
+    this_run_ids = [pid for r in result.get("results", []) for pid in r.get("page_ids", [])]
+
     conn = get_live_conn()
     try:
         with conn.cursor() as cur:
@@ -120,12 +146,18 @@ def _build_review_report(result):
                 "SELECT status, count(*) AS n FROM wiki_staging.wiki_pages WHERE status IN ('reviewed','rejected') GROUP BY status"
             )
             totals = {r["status"]: r["n"] for r in cur.fetchall()}
-            cur.execute(
-                "SELECT id, title, review_notes FROM wiki_staging.wiki_pages WHERE status = 'rejected' ORDER BY id"
-            )
-            rejected = cur.fetchall()
+            this_run = []
+            if this_run_ids:
+                cur.execute(
+                    "SELECT id, title, status, review_notes FROM wiki_staging.wiki_pages WHERE id = ANY(%s) ORDER BY id",
+                    (this_run_ids,),
+                )
+                this_run = cur.fetchall()
     finally:
         conn.close()
+
+    this_run_reviewed = [r for r in this_run if r["status"] == "reviewed"]
+    this_run_rejected = [r for r in this_run if r["status"] == "rejected"]
 
     lines = [
         f"**Wiki-ingestion review sweep — {result['drafts_total']} draft(s) reviewed, "
@@ -133,15 +165,25 @@ def _build_review_report(result):
         "",
         f"Current totals across all staging: **{totals.get('reviewed', 0)} reviewed** (awaiting promotion approval), "
         f"**{totals.get('rejected', 0)} rejected**.",
+        "",
+        "---",
+        "",
+        f"**This run: {len(this_run_reviewed)} approved, {len(this_run_rejected)} rejected**",
     ]
-    if rejected:
+    if this_run_reviewed:
+        lines += ["", "| Approved page | Notes |", "|---|---|"]
+        for r in this_run_reviewed:
+            notes = (r["review_notes"] or "").replace("\n", " ")[:200]
+            lines.append(f"| {r['title']} (id={r['id']}) | {notes} |")
+    if this_run_rejected:
         lines += ["", "| Rejected page | Reason |", "|---|---|"]
-        for r in rejected:
+        for r in this_run_rejected:
             reason = (r["review_notes"] or "").replace("\n", " ")[:300]
             lines.append(f"| {r['title']} (id={r['id']}) | {reason} |")
 
     title = f"Wiki-ingestion review sweep — {totals.get('reviewed', 0)} reviewed, {totals.get('rejected', 0)} rejected"
-    return title, "\n".join(lines)
+    state = "Todo" if result.get("chunks_failed") else "Done"
+    return title, "\n".join(lines), state
 
 
 def report_review(result):
@@ -157,13 +199,18 @@ def _build_promotion_report(result):
         "",
         f"Newly resolved links: {result.get('newly_resolved_links', 0)}",
     ]
+    if result.get("succeeded_list"):
+        lines += ["", "| Live page id | Title | Action |", "|---|---|---|"]
+        for s in result["succeeded_list"]:
+            lines.append(f"| {s['live_page_id']} | {s['title']} | {s['action']} |")
     if result.get("failed"):
         lines += ["", "| Failed |", "|---|"]
         for f in result["failed"]:
             lines.append(f"| {f} |")
 
     title = f"Wiki-ingestion promotion — {result['succeeded']}/{result['attempted']} live"
-    return title, "\n".join(lines)
+    state = "Todo" if result.get("failed") else "Done"
+    return title, "\n".join(lines), state
 
 
 def report_promotion(result):
