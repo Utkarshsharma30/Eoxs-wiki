@@ -111,7 +111,10 @@ async def _classify_one(client, sem, context):
 
 
 async def _run(items):
-    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # Deliberately a separate key from ANTHROPIC_API_KEY (used by spam_filter.py and
+    # everything else) -- the user wants this bulk job's usage/cost trackable on its
+    # own in the Anthropic console, not blended into the main key's usage.
+    client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
     sem = asyncio.Semaphore(CONCURRENCY)
     results = [None] * len(items)
     completed = 0
