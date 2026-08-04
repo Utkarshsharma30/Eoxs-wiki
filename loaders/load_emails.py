@@ -6,7 +6,7 @@ Idempotent: upserts on (source_account, gmail_thread_id); skips files whose
 mtime hasn't changed since the last load (tracked in db_sync_state).
 """
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -17,6 +17,17 @@ from parsers.email_body import split_messages
 from parsers.email_attachments import extract_attachments
 
 SOURCE_TYPE = "email_thread"
+
+# Offset FROM the labeled zone TO UTC (subtract this from the naive parsed
+# time). Only zones actually observed in the vault's message headers --
+# found live (see parsers/email_body.py's docstring): IST message headers
+# were previously invisible entirely, not just mis-timestamped, since the
+# old regex only matched "UTC". An unrecognized zone is treated as UTC
+# (same as historical behavior) rather than dropping the message.
+TZ_OFFSETS = {
+    "UTC": timedelta(0),
+    "IST": timedelta(hours=5, minutes=30),
+}
 
 # (folder relative to VAULT_ROOT, source_account, is_quarantined)
 EMAIL_ROOTS = [
@@ -108,7 +119,9 @@ def load_file(conn, path, source_account, is_quarantined):
         for msg in messages:
             msg_date = None
             try:
-                msg_date = datetime.strptime(msg["message_date_str"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                naive = datetime.strptime(msg["message_date_str"], "%Y-%m-%d %H:%M")
+                offset = TZ_OFFSETS.get(msg.get("message_tz"), timedelta(0))
+                msg_date = (naive - offset).replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
 
