@@ -42,6 +42,8 @@ TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
 - Company financial statements or bank/accounting data
 - Vendor payment terms or contracts with sensitive pricing
 - Legal or compliance matters (that are NOT Raj's personal legal matters)
+- Employee activity, performance, or productivity monitoring data -- e.g. Cattr or similar
+  tracking-tool output, individual performance metrics/scores, productivity reviews
 
 TIER2 -- General, visible company-wide: ordinary business correspondence, client implementation/
 support work, product/ops, sales orders, scheduling, recruiting (non-compensation details), and

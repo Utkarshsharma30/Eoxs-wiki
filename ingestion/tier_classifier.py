@@ -10,7 +10,8 @@ any uncertainty, API error, or exhausted retries:
                       & fundraising, company financial statements/bank
                       data, vendor payment terms / sensitive pricing
                       contracts, legal/compliance matters (non-Raj-
-                      personal).
+                      personal), employee activity/performance/
+                      productivity monitoring data (e.g. Cattr).
   tier2              General -- everything else, company-wide visible.
 
 Second-generation version of this script: the first one only had 2 levels
@@ -62,6 +63,8 @@ TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
 - Company financial statements or bank/accounting data
 - Vendor payment terms or contracts with sensitive pricing
 - Legal or compliance matters (that are NOT Raj's personal legal matters)
+- Employee activity, performance, or productivity monitoring data -- e.g. Cattr or similar
+  tracking-tool output, individual performance metrics/scores, productivity reviews
 
 TIER2 -- General, visible company-wide: ordinary business correspondence, client implementation/
 support work, product/ops, sales orders, scheduling, recruiting (non-compensation details), and

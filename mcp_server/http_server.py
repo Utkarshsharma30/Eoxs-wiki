@@ -72,7 +72,7 @@ MOUNT_PREFIX = "/mcp"
 
 IDENTITIES = [
     ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, ()),
-    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ()),
+    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",)),
     ("general", os.environ["MCP_GENERAL_URL_SECRET"], GENERAL_CLEARANCE, ()),
     ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",)),
 ]

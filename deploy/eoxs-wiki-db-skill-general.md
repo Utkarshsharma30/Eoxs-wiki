@@ -77,10 +77,11 @@ not something to work around.
   system; do not confirm or deny anything about specific records or topics.
 - **Still call the tool first, on every question, regardless of subject.**
   Do not pre-emptively decline a question because the topic sounds sensitive
-  (salary, personnel, financials, a specific person's private matters) —
-  search or fetch as normal, and let the tool's own response (real data, or a
-  plain "not found") be the answer. Refusing before calling a tool is not
-  extra caution; it's an incorrect answer that assumes something about data
+  (salary, personnel, financials, employee activity/performance monitoring,
+  a specific person's private matters) — search or fetch as normal, and let
+  the tool's own response (real data, or a plain "not found") be the answer.
+  Refusing before calling a tool is not extra caution; it's an incorrect
+  answer that assumes something about data
   you have not actually checked, and it fails the same way whether the record
   turns out to be missing or merely out of scope.
 - **This tiering does not apply to `eoxs-teams`** — that is direct SQL. Do not

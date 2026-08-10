@@ -47,6 +47,27 @@ the general-employee MCP, deliberately not a new access_tier value, but
 with monetary amounts always redacted on top). Wired in via
 build_server()'s `extra_redact_categories` param -- see
 _EXTRA_CATEGORY_DEFINITIONS below for the category text.
+
+Same day, second use of the mechanism: the HR MCP gets
+`non_payroll_monetary_amounts` -- HR's clearance (tier2_confidential +
+tier2) legitimately needs to see payroll/salary/incentive figures, but has
+no role-based reason to see client billing/pricing amounts, which happen
+to sit in the same tier2_confidential bucket. Unlike `monetary_amounts`
+(blanket, no exceptions -- intern), this category explicitly carves out
+payroll amounts as NOT restricted, so the LLM pass has to make a real
+distinction rather than a blanket strip -- see _strip_monetary_fields'
+docstring for why it deliberately does NOT run for this category.
+
+2026-08-10, same day, unrelated addition: employee activity/performance/
+productivity monitoring data (e.g. Cattr) added to the tier2_confidential
+DEFINITION itself (not a new extra_category -- this one maps exactly onto
+the existing tier2_confidential/tier2 boundary, so no carve-out mechanism
+is needed the way payroll-vs-billing needed one). Mirrored into
+ingestion/tier_classifier.py and ingestion/inline_tier_classifier.py so
+new content gets tagged correctly going forward; updating it here too
+means this safety net starts catching it immediately for general/intern
+callers even on rows that were already tagged tier2 before this change,
+without needing a full historical re-classification pass.
 """
 import json
 import logging
@@ -76,7 +97,9 @@ _TIER_DEFINITIONS = {
         "bonus figures for ANY employee, investor relations and fundraising, company "
         "financial statements or bank/accounting data, vendor payment terms or sensitive "
         "contract pricing, legal or compliance matters (that are not Raj's personal legal "
-        "matters)."
+        "matters), employee activity/performance/productivity monitoring data (e.g. Cattr or "
+        "similar tracking-tool output, individual performance metrics/scores, productivity "
+        "reviews)."
     ),
 }
 
@@ -92,6 +115,26 @@ _EXTRA_CATEGORY_DEFINITIONS = {
         "to -- flag a dollar figure in ordinary tier2 business content the same as anywhere "
         "else. Does not apply to non-monetary numbers (dates, quantities/counts of items, "
         "percentages that aren't themselves a price, phone numbers, ids)."
+    ),
+    # HR: the one identity that legitimately needs payroll amounts (that's the
+    # job) but has no business reason to see client billing/pricing -- e.g. a
+    # get_client_profile response surfacing a client's monthly charge and
+    # implementation cost (confirmed live, 2026-08-10: HR asked "how much are
+    # we charging Brannon" and got a real dollar figure back -- correct per
+    # today's tier rules, since client pricing is tier2_confidential and HR
+    # clears tier2_confidential, but not something HR's role actually needs).
+    "non_payroll_monetary_amounts": (
+        "Any monetary or currency amount that is NOT an employee payroll, salary, "
+        "compensation, incentive, or bonus figure -- in any currency or unit. Flag client "
+        "billing/subscription/licensing charges, implementation or onboarding costs, invoice "
+        "or line-item totals, deal or contract sizes, discounts or markups, vendor payments, "
+        "investor/fundraising amounts, and any other numeric value that represents an amount "
+        "of money. Do NOT flag an amount that is clearly an employee's payroll, salary, "
+        "compensation, incentive, or bonus figure -- those must stay visible; this category "
+        "exists specifically to keep payroll information visible while restricting every "
+        "other kind of monetary amount. Does not apply to non-monetary numbers (dates, "
+        "quantities/counts of items, percentages that aren't themselves a price, phone "
+        "numbers, ids)."
     ),
 }
 
@@ -162,7 +205,17 @@ def _strip_monetary_fields(obj):
     requested, independent of whether there's any string content to check
     at all -- the LLM pass remains the backstop for amounts mentioned in
     free text (email/call bodies, wiki prose), which this can't catch
-    since it only knows fixed field names, not arbitrary prose."""
+    since it only knows fixed field names, not arbitrary prose.
+
+    Deliberately NOT triggered by non_payroll_monetary_amounts (only the
+    literal "monetary_amounts" check below does that) -- a field name
+    alone can't tell payroll apart from client billing, and blanket-
+    stripping every _MONETARY_FIELD_NAMES field regardless would strip
+    payroll amounts too, exactly what that category exists to keep
+    visible. The LLM pass is the only mechanism that can make that call,
+    which is fine here since HR's tools don't expose the structured
+    Odoo invoice fields this targets anyway (get_invoice/search_invoices
+    were removed from every non-full identity in 2026-08)."""
     if isinstance(obj, dict):
         return {
             k: ("[restricted: amount]" if k in _MONETARY_FIELD_NAMES and v is not None else _strip_monetary_fields(v))
