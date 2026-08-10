@@ -59,17 +59,18 @@ GENERAL_CLEARANCE = ["tier2"]
 # ---------------------------------------------------------------------------
 
 def get_index(clearance=FULL_CLEARANCE):
+    # tickets/sales_orders deliberately absent (2026-08-10): removed from
+    # this system entirely -- support tickets and invoices now live only
+    # in EOXS Teams Odoo, a separate connector, faster to query there.
     counts = db_query_one("""
         SELECT
             (SELECT count(*) FROM wiki_pages WHERE access_tier::text = ANY(%s)) AS wiki_pages,
             (SELECT count(*) FROM email_threads WHERE access_tier::text = ANY(%s)) AS email_threads,
-            (SELECT count(*) FROM tickets WHERE access_tier::text = ANY(%s)) AS tickets,
-            (SELECT count(*) FROM sales_orders WHERE access_tier::text = ANY(%s)) AS sales_orders,
             (SELECT count(*) FROM call_transcripts WHERE source='fireflies' AND access_tier::text = ANY(%s)) AS fireflies_calls,
             (SELECT count(*) FROM call_transcripts WHERE source='fathom' AND access_tier::text = ANY(%s)) AS fathom_calls,
             (SELECT count(*) FROM clients) AS clients,
             (SELECT count(*) FROM implementation_tasks WHERE access_tier::text = ANY(%s)) AS implementation_tasks
-    """, (clearance, clearance, clearance, clearance, clearance, clearance, clearance))
+    """, (clearance, clearance, clearance, clearance, clearance))
     by_type = db_query(
         "SELECT page_type, count(*) AS n FROM wiki_pages WHERE access_tier::text = ANY(%s) GROUP BY page_type ORDER BY page_type",
         (clearance,),
@@ -177,9 +178,9 @@ def get_email(identifier, clearance=FULL_CLEARANCE):
 def get_attachment_text(attachment_id, clearance=FULL_CLEARANCE):
     """Returns the extracted text for one email attachment, by the 'id' from
     get_email's attachments list. Attachments have no access_tier column of
-    their own -- enforced via a join to the parent thread's access_tier,
-    same pattern as ticket_events/invoice_lines (only ever reachable through
-    their parent's get_ticket/get_invoice, which check the parent's tier).
+    their own -- enforced via a join to the parent thread's access_tier
+    instead, same defense-in-depth pattern used everywhere a child row is
+    only ever reachable through a parent that already checks tier.
     extracted_text is NULL for formats extraction doesn't support (only pdf/
     docx/xlsx/csv are covered) -- callers should check get_email's
     text_extracted flag first rather than assume every attachment has text."""
@@ -249,66 +250,6 @@ def get_call(identifier, clearance=FULL_CLEARANCE):
     return call
 
 
-def get_ticket(identifier, clearance=FULL_CLEARANCE):
-    ticket = db_query_one(
-        "SELECT * FROM tickets WHERE ticket_number = %s AND access_tier::text = ANY(%s)", (identifier.upper(), clearance)
-    )
-    if not ticket:
-        ticket = db_query_one(
-            "SELECT * FROM tickets WHERE subject ILIKE %s AND access_tier::text = ANY(%s) LIMIT 1",
-            (f"%{identifier}%", clearance),
-        )
-    if not ticket:
-        return {"error": f"no ticket matching '{identifier}'"}
-    ticket["events"] = db_query(
-        "SELECT event_order, event_type, author, event_time, body FROM ticket_events WHERE ticket_id = %s ORDER BY event_order",
-        (ticket["id"],),
-    )
-    ticket["attachments"] = db_query(
-        "SELECT filename, relative_path FROM ticket_attachments WHERE ticket_id = %s", (ticket["id"],)
-    )
-    return ticket
-
-
-def search_tickets(query, clearance=FULL_CLEARANCE):
-    return db_query(
-        """SELECT ticket_number, client_raw, subject, status, priority, ticket_created
-           FROM tickets
-           WHERE (subject ILIKE %s OR client_raw ILIKE %s OR description ILIKE %s OR ticket_number ILIKE %s)
-             AND access_tier::text = ANY(%s)
-           ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
-        tuple([f"%{query}%"] * 4) + (clearance,),
-    )
-
-
-def get_invoice(identifier, clearance=FULL_CLEARANCE):
-    order = db_query_one(
-        "SELECT * FROM sales_orders WHERE order_number = %s AND access_tier::text = ANY(%s)", (identifier.upper(), clearance)
-    )
-    if not order:
-        order = db_query_one(
-            "SELECT * FROM sales_orders WHERE client_raw ILIKE %s AND access_tier::text = ANY(%s) LIMIT 1",
-            (f"%{identifier}%", clearance),
-        )
-    if not order:
-        return {"error": f"no sales order matching '{identifier}'"}
-    order["lines"] = db_query(
-        "SELECT product, description, qty, delivered, invoiced, unit_price, discount_pct, subtotal FROM order_lines WHERE sales_order_id = %s ORDER BY line_order",
-        (order["id"],),
-    )
-    return order
-
-
-def search_invoices(query, clearance=FULL_CLEARANCE):
-    return db_query(
-        """SELECT order_number, client_raw, order_date, amount_total, currency, state_label
-           FROM sales_orders
-           WHERE (client_raw ILIKE %s OR order_number ILIKE %s) AND access_tier::text = ANY(%s)
-           ORDER BY order_date DESC NULLS LAST LIMIT 20""",
-        (f"%{query}%", f"%{query}%", clearance),
-    )
-
-
 def list_clients():
     return db_query("SELECT id, slug, display_name, domains, odoo_base_url FROM clients ORDER BY display_name")
 
@@ -329,20 +270,24 @@ def list_contacts(client=""):
 
 def get_client_profile(client, clearance=FULL_CLEARANCE):
     """Aggregates everything linked to one client by client_id in a single
-    call -- every raw table (tickets, email_threads, call_transcripts,
-    implementation_tasks, sales_orders) has a client_id column, but every
-    other tool here only searches ONE of them at a time, so answering
-    something like "give me everything on client X" required chaining 5+
-    separate tool calls with no guarantee the caller actually would. This
-    is the single-call alternative: client record, contacts, and recent-
-    activity summaries across every source, cross-linked by client_id --
-    not exhaustive detail (use get_ticket/get_email/get_call/
-    get_implementation_task for that), but enough to see the whole
-    relationship at a glance and know what to drill into. Every recent-
-    activity list and count below is clearance-filtered the same as the
-    dedicated list_*/search_* tools -- a general-clearance caller sees
-    fewer tickets/tasks/emails/calls and lower counts for this client, not
-    an error.
+    call -- every raw table (email_threads, call_transcripts,
+    implementation_tasks) has a client_id column, but every other tool
+    here only searches ONE of them at a time, so answering something like
+    "give me everything on client X" required chaining several separate
+    tool calls with no guarantee the caller actually would. This is the
+    single-call alternative: client record, contacts, and recent-activity
+    summaries across every source, cross-linked by client_id -- not
+    exhaustive detail (use get_email/get_call/get_implementation_task for
+    that), but enough to see the whole relationship at a glance and know
+    what to drill into. Every recent-activity list and count below is
+    clearance-filtered the same as the dedicated list_*/search_* tools --
+    a general-clearance caller sees fewer tasks/emails/calls and lower
+    counts for this client, not an error.
+
+    2026-08-10: support tickets and invoices/sales orders removed from
+    this system entirely (now sourced live from EOXS Teams Odoo via a
+    separate connector, faster to query there directly) -- no
+    ticket/sales_order fields here anymore.
 
     NOTE on scope: only searches LIVE tables. Synthesized wiki content for
     this client may exist in wiki_staging (reviewed, not yet promoted) --
@@ -362,14 +307,6 @@ def get_client_profile(client, clearance=FULL_CLEARANCE):
     row["contacts"] = db_query(
         "SELECT name, email, is_relay_inbox FROM contacts WHERE client_id = %s ORDER BY name", (client_id,)
     )
-    row["tickets"] = db_query(
-        """SELECT ticket_number, subject, status, priority, ticket_created
-           FROM tickets WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
-        (client_id, clearance),
-    )
-    row["ticket_count"] = db_query_one(
-        "SELECT count(*) AS n FROM tickets WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
-    )["n"]
     row["implementation_tasks_recent"] = db_query(
         """SELECT task_name, stage, owner, task_created_date
            FROM implementation_tasks WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY task_created_date DESC NULLS LAST LIMIT 20""",
@@ -394,10 +331,6 @@ def get_client_profile(client, clearance=FULL_CLEARANCE):
     row["call_count"] = db_query_one(
         "SELECT count(*) AS n FROM call_transcripts WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
     )["n"]
-    row["sales_orders_count"] = db_query_one(
-        "SELECT count(*) AS n FROM sales_orders WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
-    )["n"]
-
     row["live_wiki_pages"] = db_query(
         "SELECT title, page_type FROM wiki_pages WHERE title ILIKE %s AND access_tier::text = ANY(%s) ORDER BY title",
         (f"%{row['display_name']}%", clearance),
@@ -416,7 +349,7 @@ def get_client_profile(client, clearance=FULL_CLEARANCE):
 
 
 def get_client_file(file_path, clearance=FULL_CLEARANCE):
-    for table in ("tickets", "sales_orders", "call_transcripts"):
+    for table in ("call_transcripts",):
         row = db_query_one(f"SELECT * FROM {table} WHERE source_file_path = %s AND access_tier::text = ANY(%s)", (file_path, clearance))
         if row:
             row.pop("transcript_tsv", None)
@@ -508,7 +441,7 @@ def get_implementation_task(task_id, clearance=FULL_CLEARANCE):
 # is untiered (list_clients/list_contacts -- no access_tier column at all).
 TIER_FILTERED_TOOLS = {
     "get_index", "get_wiki_page", "search_wiki", "list_emails", "search_emails", "get_email", "get_attachment_text",
-    "list_calls", "search_calls", "get_call", "get_ticket", "search_tickets", "get_invoice", "search_invoices",
+    "list_calls", "search_calls", "get_call",
     "get_client_profile", "get_client_file", "list_implementation_tasks", "search_implementation_tasks",
     "get_implementation_task",
 }
@@ -524,10 +457,6 @@ TOOLS = {
     "list_calls": list_calls,
     "search_calls": search_calls,
     "get_call": get_call,
-    "get_ticket": get_ticket,
-    "search_tickets": search_tickets,
-    "get_invoice": get_invoice,
-    "search_invoices": search_invoices,
     "list_clients": list_clients,
     "list_contacts": list_contacts,
     "get_client_profile": get_client_profile,
@@ -604,26 +533,6 @@ def _tool_defs():
             inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
         ),
         Tool(
-            name="get_ticket",
-            description="Return a support ticket by ticket number (e.g. 'T00123') or partial subject, with its full activity thread.",
-            inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
-        ),
-        Tool(
-            name="search_tickets",
-            description="Search support tickets by client, subject, description, or ticket number.",
-            inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-        ),
-        Tool(
-            name="get_invoice",
-            description="Return a sales order/invoice by order number (e.g. 'S00123') or partial client name, with order lines.",
-            inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
-        ),
-        Tool(
-            name="search_invoices",
-            description="Search sales orders/invoices by client or order number.",
-            inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-        ),
-        Tool(
             name="list_clients",
             description="List all clients in the registry (slug, display name, domains, Odoo instance).",
             inputSchema={"type": "object", "properties": {}},
@@ -637,16 +546,18 @@ def _tool_defs():
         Tool(
             name="get_client_profile",
             description="THE tool for 'tell me everything about client X' -- aggregates the client record, "
-                        "contacts, recent tickets, recent implementation tasks, recent emails, recent calls, "
-                        "sales order count, and live+pending-promotion wiki pages, all cross-linked by client_id "
-                        "in one call. Prefer this over chaining separate search_* calls for a client overview; "
-                        "use the individual get_ticket/get_email/get_call/get_implementation_task tools to drill "
-                        "into any one item this surfaces. client: slug (e.g. 'sabre-alloys') or a display-name substring.",
+                        "contacts, recent implementation tasks, recent emails, recent calls, and "
+                        "live+pending-promotion wiki pages, all cross-linked by client_id in one call. Prefer "
+                        "this over chaining separate search_* calls for a client overview; use the individual "
+                        "get_email/get_call/get_implementation_task tools to drill into any one item this "
+                        "surfaces. Support tickets and invoices/sales orders are not in this system -- query "
+                        "EOXS Teams Odoo directly for those. client: slug (e.g. 'sabre-alloys') or a "
+                        "display-name substring.",
             inputSchema={"type": "object", "properties": {"client": {"type": "string"}}, "required": ["client"]},
         ),
         Tool(
             name="get_client_file",
-            description="Return a row from any loaded table by its original source_file_path (ticket, sales order, call, or wiki page).",
+            description="Return a row from any loaded table by its original source_file_path (call transcript or wiki page).",
             inputSchema={"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
         ),
         Tool(
