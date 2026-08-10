@@ -1,3 +1,8 @@
+---
+name: eoxs-data-general
+description: Navigation and access-scope guide for the general-access EOXS data connectors (eoxs-db, eoxs-teams) — which connector to use for a question, tier-scope rules, and answer formatting. Use whenever a question touches EOXS emails, calls, wiki, implementation tasks, tickets, invoices, or CRM/pipeline data.
+---
+
 # EOXS Data — Session Skill (General Access)
 
 You have two EOXS data connectors, both **read-only**. They are different

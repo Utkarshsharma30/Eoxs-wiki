@@ -1,3 +1,8 @@
+---
+name: raj-eoxs-vault
+description: Navigation and access-scope guide for the full-clearance EOXS data connectors (eoxs-db, eoxs-teams, teams-askcruz) — which connector to use for a question, redaction/tier rules, and answer formatting. Use whenever a question touches EOXS emails, calls, wiki, implementation tasks, tickets, invoices, CRM, or the askcruz Odoo project.
+---
+
 # EOXS Data — Session Skill
 
 You have three EOXS data connectors. They are different systems with different

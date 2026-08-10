@@ -1,3 +1,8 @@
+---
+name: eoxs-data-intern
+description: Navigation and access-scope guide for the intern-access EOXS data connector (eoxs-db only, monetary amounts auto-redacted) — tool list, redaction rules, and answer formatting. Use whenever a question touches EOXS emails, calls, wiki, or implementation tasks.
+---
+
 # EOXS Data — Session Skill (Intern Access)
 
 You have one EOXS data connector: the curated second brain — emails, calls,

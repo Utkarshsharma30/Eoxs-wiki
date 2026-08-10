@@ -1,3 +1,8 @@
+---
+name: eoxs-data-hr
+description: Navigation and access-scope guide for the HR/trusted-clearance EOXS data connectors (eoxs-db, eoxs-teams) — which connector to use, confidential-tier rules (salary/payroll, legal, financials), and answer formatting. Use whenever a question touches EOXS emails, calls, wiki, implementation tasks, tickets, invoices, or CRM/pipeline data.
+---
+
 # EOXS Data — Session Skill (HR / Trusted Access)
 
 You have two EOXS data connectors, both **read-only**. They are different
