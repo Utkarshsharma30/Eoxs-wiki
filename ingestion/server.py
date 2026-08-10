@@ -86,6 +86,13 @@ def _verify_svix(secret, svix_id, svix_timestamp, body, svix_signature):
 def run_gmail_all():
     counts = {}
     for account in GMAIL_ACCOUNTS:
+        # 2026-08-10: remya_gmail deliberately excluded from the recurring
+        # sweep -- one-time-only historical data per explicit instruction,
+        # not an ongoing source. gmail_fetcher.py still supports it directly
+        # (python -m ingestion.gmail_fetcher --account remya_gmail) if ever
+        # needed again; this only stops the automatic recurring fetch.
+        if account == "remya_gmail":
+            continue
         try:
             counts[account] = gmail_process_account(account)
         except Exception as e:
@@ -113,7 +120,11 @@ def run_full_sweep():
         ("zoho", process_zoho),
         ("fireflies", process_fireflies),
         ("fathom", process_fathom),
-        ("odoo", odoo_process_all),
+        # "odoo" (per-client implementation-task Kanban fetch) removed
+        # 2026-08-10: one-time-only historical data per explicit
+        # instruction, not an ongoing source -- odoo_fetcher.py still
+        # supports it directly (python -m ingestion.odoo_fetcher) if ever
+        # needed again; this only stops the automatic recurring fetch.
         ("tickets", process_tickets),
         ("invoices", process_invoices),
     ]:
