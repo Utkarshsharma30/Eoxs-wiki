@@ -673,13 +673,19 @@ def _tool_defs():
     ]
 
 
-def build_server(clearance, name="eoxs-wiki-db"):
+def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=()):
     """Builds a fresh Server instance whose tier-filtered tools are all
     bound to `clearance`. Each identity (stdio/local, or one HTTP/SSE
     secret path) gets its OWN Server instance from this -- clearance is
     baked in at construction time via functools.partial, never read from
     a request, so nothing an MCP client sends can change which rows it
-    can see."""
+    can see.
+
+    extra_redact_categories: passed straight through to every
+    redaction.check_and_redact() call for this identity -- content-based
+    restrictions with no access_tier equivalent (e.g. the intern
+    identity's "no monetary amounts", same row-level access as
+    GENERAL_CLEARANCE otherwise). See mcp_server/redaction.py."""
     tools = {
         tool_name: (functools.partial(func, clearance=clearance) if tool_name in TIER_FILTERED_TOOLS else func)
         for tool_name, func in TOOLS.items()
@@ -707,7 +713,9 @@ def build_server(clearance, name="eoxs-wiki-db"):
             # has nothing to check against. Never runs on an already-
             # errored result -- nothing to redact from an error message.
             if "tier1" not in clearance:
-                result = await redaction.check_and_redact(result, clearance, tool_name, clearance_name=name)
+                result = await redaction.check_and_redact(
+                    result, clearance, tool_name, clearance_name=name, extra_categories=extra_redact_categories,
+                )
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     return srv

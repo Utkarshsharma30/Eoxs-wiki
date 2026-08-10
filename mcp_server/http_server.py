@@ -16,7 +16,7 @@ SSE endpoint is mounted under its own long random secret path segment, so
 the URL itself is what gates access AND which access_tier clearance the
 connection gets.
 
-Three identities, three secrets, three independent Server instances (see
+Four identities, four secrets, four independent Server instances (see
 server.py's build_server()) -- clearance is baked into each instance at
 construction time, never derived from anything in the request, so there's
 no header/param a client could send to widen its own access:
@@ -30,6 +30,12 @@ no header/param a client could send to widen its own access:
     not tier1/Raj-personal). For HR and other explicitly-trusted roles.
   - MCP_GENERAL_URL_SECRET -> GENERAL_CLEARANCE (tier2 only). For any
     other employee's connector.
+  - MCP_INTERN_URL_SECRET  -> GENERAL_CLEARANCE (same row-level access as
+    general -- deliberately NOT a new access_tier value), plus
+    extra_redact_categories=("monetary_amounts",): every tool response
+    also gets checked for dollar figures/prices/totals/deal sizes and has
+    them stripped, on top of the normal tier2-only filtering. For interns
+    -- same data as any other employee, minus every number that's money.
 
 Run with: python -m mcp_server.http_server  (dev, binds 127.0.0.1 only)
 Deployed via systemd as eoxs-mcp.service, reverse-proxied by nginx at
@@ -65,14 +71,17 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 MOUNT_PREFIX = "/mcp"
 
 IDENTITIES = [
-    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE),
-    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE),
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], GENERAL_CLEARANCE),
+    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, ()),
+    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ()),
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], GENERAL_CLEARANCE, ()),
+    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",)),
 ]
 
 
-def _make_routes(identity_name, secret, clearance):
-    mcp_server_instance = build_server(clearance, name=f"eoxs-wiki-db-{identity_name}")
+def _make_routes(identity_name, secret, clearance, extra_redact_categories=()):
+    mcp_server_instance = build_server(
+        clearance, name=f"eoxs-wiki-db-{identity_name}", extra_redact_categories=extra_redact_categories,
+    )
     sse = SseServerTransport(f"{MOUNT_PREFIX}/{secret}/messages/")
 
     async def _handle_sse_raw(scope, receive, send):
@@ -92,7 +101,11 @@ def _make_routes(identity_name, secret, clearance):
     ]
 
 
-routes = [route for identity_name, secret, clearance in IDENTITIES for route in _make_routes(identity_name, secret, clearance)]
+routes = [
+    route
+    for identity_name, secret, clearance, extra in IDENTITIES
+    for route in _make_routes(identity_name, secret, clearance, extra)
+]
 
 app = Starlette(routes=routes)
 

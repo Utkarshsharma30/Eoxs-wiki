@@ -38,6 +38,15 @@ Design, confirmed 2026-08:
 - Every time this actually redacts something, it's logged to
   mcp_redaction_log (schema/023_mcp_redaction_log.sql) so the underlying
   page/row's tier can be corrected at the source.
+
+2026-08-10 addition: `check_and_redact` now also accepts `extra_categories`
+-- restricted categories that apply regardless of clearance/access_tier,
+for identities that need a content-based restriction with no matching DB
+tier at all (the intern MCP: same GENERAL_CLEARANCE row-level access as
+the general-employee MCP, deliberately not a new access_tier value, but
+with monetary amounts always redacted on top). Wired in via
+build_server()'s `extra_redact_categories` param -- see
+_EXTRA_CATEGORY_DEFINITIONS below for the category text.
 """
 import json
 import logging
@@ -69,6 +78,35 @@ _TIER_DEFINITIONS = {
         "contract pricing, legal or compliance matters (that are not Raj's personal legal "
         "matters)."
     ),
+}
+
+# Not access_tier values -- these are content-based restrictions applied on
+# top of a clearance's normal tier filtering, not in place of it. Passed in
+# via check_and_redact's extra_categories, never derived from clearance.
+_EXTRA_CATEGORY_DEFINITIONS = {
+    "monetary_amounts": (
+        "Any monetary or currency amount, in any currency or unit -- dollar/other-currency "
+        "figures, prices, invoice or line-item totals, deal or contract sizes, discounts or "
+        "markups, salary/payroll numbers, or any other numeric value that represents an "
+        "amount of money. Applies regardless of which tier the surrounding content belongs "
+        "to -- flag a dollar figure in ordinary tier2 business content the same as anywhere "
+        "else. Does not apply to non-monetary numbers (dates, quantities/counts of items, "
+        "percentages that aren't themselves a price, phone numbers, ids)."
+    ),
+}
+
+_ALL_CATEGORY_DEFINITIONS = {**_TIER_DEFINITIONS, **_EXTRA_CATEGORY_DEFINITIONS}
+
+# Checked directly against the live schema (2026-08-10): the only numeric
+# currency-amount fields reachable by any tier2-visible tool, across every
+# table GENERAL_CLEARANCE can query (sales_orders/order_lines/invoices/
+# invoice_lines via get_invoice/search_invoices -- tickets/
+# implementation_tasks/clients/call_transcripts/email_threads have none).
+# discount_pct is deliberately excluded -- a percentage, not a currency
+# amount (matches monetary_amounts' own definition above).
+_MONETARY_FIELD_NAMES = {
+    "amount_total", "unit_price", "subtotal", "amount_untaxed",
+    "amount_tax", "amount_paid", "amount_due",
 }
 
 _PROMPT = """You are a security safety-net for Cruz, EOXS's internal knowledge base. A database
@@ -108,6 +146,31 @@ def _walk_strings(obj):
             yield from _walk_strings(v)
     elif isinstance(obj, str):
         yield obj
+
+
+def _strip_monetary_fields(obj):
+    """Deterministically blanks dict values under known currency-amount
+    field names (_MONETARY_FIELD_NAMES) -- covers structured numeric
+    fields (Decimal/int/float) that _walk_strings/the LLM text pass below
+    would never see, since those only ever look at string leaves. A raw
+    Decimal amount_total is never a string until json.dumps() serializes
+    the final response, well after this runs, so without this the LLM
+    pass silently has nothing to redact and the real figure ships intact
+    -- confirmed live against a real search_invoices result before this
+    was added (amount_total passed through completely unredacted).
+    Runs unconditionally before the LLM pass whenever monetary_amounts is
+    requested, independent of whether there's any string content to check
+    at all -- the LLM pass remains the backstop for amounts mentioned in
+    free text (email/call bodies, wiki prose), which this can't catch
+    since it only knows fixed field names, not arbitrary prose."""
+    if isinstance(obj, dict):
+        return {
+            k: ("[restricted: amount]" if k in _MONETARY_FIELD_NAMES and v is not None else _strip_monetary_fields(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_strip_monetary_fields(v) for v in obj]
+    return obj
 
 
 def _replace_in_structure(obj, replacements):
@@ -170,8 +233,12 @@ def _parse_spans(raw_text):
     return spans
 
 
-async def check_and_redact(result, clearance, tool_name, clearance_name="unknown"):
-    """Returns the (possibly modified) result. Never raises -- on
+async def check_and_redact(result, clearance, tool_name, clearance_name="unknown", extra_categories=()):
+    """extra_categories: additional restricted-category keys (see
+    _EXTRA_CATEGORY_DEFINITIONS) to check regardless of clearance -- for a
+    content-based restriction with no corresponding access_tier value.
+
+    Returns the (possibly modified) result. Never raises -- on
     repeated failure returns a blocked/"unavailable" placeholder instead
     of the original (fail closed) rather than passing through anything
     unverified.
@@ -190,7 +257,10 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
     _walk_strings/_replace_in_structure) instead of a JSON serialization
     sidesteps the entire escaping-mismatch class of bug structurally,
     not just the two specific instances found so far."""
-    restricted = _restricted_tiers(clearance)
+    if "monetary_amounts" in extra_categories:
+        result = _strip_monetary_fields(result)
+
+    restricted = _restricted_tiers(clearance) + list(extra_categories)
     if not restricted:
         return result  # this clearance already sees everything -- nothing to check
 
@@ -199,7 +269,7 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
         return result
 
     content_for_model = "\n---\n".join(strings)
-    definitions = "\n".join(f"- {t}: {_TIER_DEFINITIONS[t]}" for t in restricted)
+    definitions = "\n".join(f"- {t}: {_ALL_CATEGORY_DEFINITIONS[t]}" for t in restricted)
     prompt = _PROMPT.format(restricted_definitions=definitions, content=content_for_model[:_MAX_CHARS])
 
     client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
