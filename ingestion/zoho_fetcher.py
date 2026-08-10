@@ -12,6 +12,7 @@ import argparse
 import base64
 import html
 import logging
+import mimetypes
 import os
 import re
 import sys
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
+from ingestion.attachment_extract import MAX_EXTRACT_BYTES, extract_text, is_extractable
 from ingestion.db import dual_write
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
@@ -156,6 +158,14 @@ class ZohoClient:
         attachments = data.get("attachments", []) if isinstance(data, dict) else []
         return attachments if isinstance(attachments, list) else []
 
+    def fetch_attachment_content(self, folder_id, message_id, attachment_id):
+        """Downloads one attachment's raw bytes."""
+        resp = self._request(
+            "GET",
+            f"{MAIL_API_BASE}/accounts/{self.account_id}/folders/{folder_id}/messages/{message_id}/attachments/{attachment_id}",
+        )
+        return resp.content
+
 
 def decode_zoho_body(content_data):
     raw = content_data.get("content", "")
@@ -225,8 +235,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
 
                 # hasAttachment is the string "1"/"0", not a bool -- "0" is
                 # truthy in Python, so an `if m.get("hasAttachment")` check
-                # would wrongly fire on every message. Metadata only, no
-                # byte content (v1 scope, see schema/015's comment).
+                # would wrongly fire on every message.
                 if str(m.get("hasAttachment")) == "1":
                     for att in client.fetch_attachment_info(m["folderId"], m["messageId"]):
                         size = att.get("attachmentSize")
@@ -234,9 +243,28 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                             size_int = int(size)
                         except (TypeError, ValueError):
                             size_int = None
+                        filename = att.get("attachmentName") or f"attachment-{att.get('attachmentId', '')}"
+                        attachment_id = att.get("attachmentId")
+                        # Zoho's attachmentinfo response has no reliable
+                        # content-type field (confirmed against live data --
+                        # earlier code guessed a nonexistent "attachmentType"
+                        # key) -- derive from the filename instead.
+                        mimetype = mimetypes.guess_type(filename)[0]
+
+                        extracted = None
+                        if attachment_id and is_extractable(filename) and size_int is not None and size_int <= MAX_EXTRACT_BYTES:
+                            try:
+                                data = client.fetch_attachment_content(m["folderId"], m["messageId"], attachment_id)
+                                extracted = extract_text(data, filename)
+                            except Exception as e:
+                                logger.warning("attachment extract failed message=%s filename=%r: %s", m["messageId"], filename, e)
+
                         attachments_by_message_index.setdefault(i + 1, []).append({
-                            "filename": att.get("attachmentName") or f"attachment-{att.get('attachmentId', '')}",
+                            "filename": filename,
                             "size_bytes": size_int,
+                            "source_attachment_id": attachment_id,
+                            "mimetype": mimetype,
+                            "extracted_text": extracted,
                         })
 
             subject = msgs[0].get("subject", "(no subject)")

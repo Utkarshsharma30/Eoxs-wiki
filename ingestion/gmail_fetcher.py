@@ -24,6 +24,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from ingestion.attachment_extract import MAX_EXTRACT_BYTES, extract_text, is_extractable
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
@@ -149,13 +150,23 @@ def find_gmail_attachment_parts(payload):
     return found
 
 
-def extract_attachments(payload):
-    """Metadata only (filename/size/note) -- no byte content is downloaded
-    or stored in this system (v1 scope, matching the same decision made
-    for Odoo implementation-task attachments in schema/014's comment).
-    Nothing is silently dropped: every attachment part found gets a row,
-    inline images (signature logos, tracking pixels) are still recorded,
-    just noted as such."""
+def download_attachment(service, message_id, attachment_id):
+    request = service.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id)
+    resp = call_with_retry(
+        lambda: request.execute(num_retries=GMAIL_NUM_RETRIES),
+        is_retryable=_is_retryable, retry_after_getter=_retry_after,
+    )
+    return base64.urlsafe_b64decode(resp["data"])
+
+
+def extract_attachments(service, message_id, payload):
+    """mimetype/source_attachment_id come free from the part metadata
+    already in this response -- no extra API call. Bytes are only
+    downloaded (one extra API call each) for extractable types
+    (pdf/docx/xlsx/txt/csv) under attachment_extract.MAX_EXTRACT_BYTES;
+    everything else still gets full metadata, just no extracted_text.
+    A download/extract failure degrades to no text rather than failing
+    the whole thread -- see ingestion/attachment_extract.py."""
     attachments = []
     for part in find_gmail_attachment_parts(payload):
         size = part.get("body", {}).get("size")
@@ -164,10 +175,25 @@ def extract_attachments(payload):
         except (TypeError, ValueError):
             size_int = None
         note = "inline image" if _content_disposition_is_inline(part) else None
+        filename = part.get("filename") or f"attachment-{part.get('body', {}).get('attachmentId', '')}"
+        attachment_id = part.get("body", {}).get("attachmentId")
+        mimetype = part.get("mimeType") or None
+
+        extracted = None
+        if attachment_id and is_extractable(filename) and size_int is not None and size_int <= MAX_EXTRACT_BYTES:
+            try:
+                data = download_attachment(service, message_id, attachment_id)
+                extracted = extract_text(data, filename)
+            except Exception as e:
+                logger.warning("attachment extract failed message=%s filename=%r: %s", message_id, filename, e)
+
         attachments.append({
-            "filename": part.get("filename") or f"attachment-{part.get('body', {}).get('attachmentId', '')}",
+            "filename": filename,
             "size_bytes": size_int,
             "note": note,
+            "source_attachment_id": attachment_id,
+            "mimetype": mimetype,
+            "extracted_text": extracted,
         })
     return attachments
 
@@ -210,7 +236,7 @@ def fetch_thread_detail(service, thread_id):
         })
         message_ids.append(m["id"])
 
-        atts = extract_attachments(m["payload"])
+        atts = extract_attachments(service, m["id"], m["payload"])
         if atts:
             attachments_by_message_index[i + 1] = atts
 

@@ -12,7 +12,9 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
                   message_count, participants, thread_dates, tags, is_quarantined,
                   generated_at, messages, attachments_by_message_index=None, client_id=None):
     """messages: list of dicts {message_index, message_date, from_addr, body, message_ids}
-    attachments_by_message_index: dict {message_index: [{filename, relative_path, size_bytes, note}]}
+    attachments_by_message_index: dict {message_index: [{filename, relative_path, size_bytes,
+    note, source_attachment_id, mimetype, extracted_text}]} -- the last three are populated by
+    the fetcher's attachment_extract call, None/missing for attachments it couldn't extract.
     client_id: from ingestion.routing.classify_client(index, participants), or None if no
     participant matched a known client contact/domain -- caller's responsibility to classify,
     this just stores the result (matches call_transcripts' existing client_id pattern).
@@ -71,11 +73,15 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
             for att in attachments_by_message_index.get(msg["message_index"], []):
                 cur.execute(
                     """
-                    INSERT INTO email_attachments (thread_id, message_id, filename, relative_path, size_bytes, note)
-                    VALUES (%s,%s,%s,%s,%s,%s)
+                    INSERT INTO email_attachments (
+                        thread_id, message_id, filename, relative_path, size_bytes, note,
+                        source_attachment_id, mimetype, extracted_text
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (thread_id, message_id, att["filename"], att.get("relative_path"),
-                     att.get("size_bytes"), att.get("note")),
+                     att.get("size_bytes"), att.get("note"), att.get("source_attachment_id"),
+                     att.get("mimetype"), att.get("extracted_text")),
                 )
 
     conn.commit()
