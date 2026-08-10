@@ -34,6 +34,7 @@ from ingestion.routing import load_client_index, classify_client
 from ingestion.write_call import write_call, existing_call
 from ingestion.inline_tier_classifier import classify_tier
 from ingestion.retry import call_with_retry
+from ingestion.tz import et_date
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.fireflies")
@@ -287,7 +288,7 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 write_call,
                 source=SOURCE, external_id=external_id,
                 meeting_title=detail.get("title") or "",
-                call_date=call_dt.date() if call_dt else None,
+                call_date=et_date(call_dt),
                 duration_seconds=duration_to_seconds(detail.get("duration")),
                 duration_human=fmt_duration(detail.get("duration")),
                 host_email=detail.get("host_email") or "",

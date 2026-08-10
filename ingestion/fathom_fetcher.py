@@ -27,6 +27,7 @@ from ingestion.call_relevance import is_call_relevant
 from ingestion.write_call import write_call, existing_call
 from ingestion.inline_tier_classifier import classify_tier
 from ingestion.retry import call_with_retry
+from ingestion.tz import et_date
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.fathom")
@@ -259,7 +260,7 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 write_call,
                 source=SOURCE, external_id=recording_id,
                 meeting_title=meeting.get("title") or "",
-                call_date=call_dt.date(),
+                call_date=et_date(call_dt),
                 duration_seconds=duration_secs,
                 duration_human=fmt_duration(duration_secs),
                 host_email="", participants=participants,
