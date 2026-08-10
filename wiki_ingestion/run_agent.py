@@ -8,7 +8,7 @@ config) live in headless_agent.py, shared with Phase 4's consolidation
 sub-agent -- see that module's docstring for the deny-list-length bug
 this was built around.
 """
-from wiki_ingestion.headless_agent import run_headless_agent
+from wiki_ingestion.headless_agent import run_headless_agent, WIKI_MCP_BASE_URL
 
 PROMPT_TEMPLATE = """You are a wiki-ingestion sub-agent for eoxs-wiki-db, EOXS's second-brain database.
 
@@ -60,13 +60,13 @@ def build_prompt(source_kind, rows):
     return PROMPT_TEMPLATE.format(source_kind=source_kind, row_count=len(rows), row_list=row_list)
 
 
-def run_agent(cycle_id, source_kind, rows, timeout_seconds=1200, max_attempts=3, retry_delay_seconds=5):
+def run_agent(cycle_id, source_kind, rows, timeout_seconds=1200, max_attempts=5, retry_delay_seconds=10):
     """Runs one headless claude -p invocation for this category batch.
     Returns {ok, returncode, stdout, stderr, attempts} -- see
     headless_agent.run_headless_agent for the never-raises contract."""
     prompt = build_prompt(source_kind, rows)
-    env = {"WIKI_CYCLE_ID": str(cycle_id), "WIKI_SOURCE_KIND": source_kind}
+    url = f"{WIKI_MCP_BASE_URL}/wiki-agent/{cycle_id}/{source_kind}/sse"
     return run_headless_agent(
-        "wiki_ingestion.agent_mcp_server", env, prompt,
+        url, prompt,
         timeout_seconds=timeout_seconds, max_attempts=max_attempts, retry_delay_seconds=retry_delay_seconds,
     )

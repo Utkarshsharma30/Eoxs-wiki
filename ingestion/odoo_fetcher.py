@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import set_last_synced_at, now_utc
 from ingestion.write_implementation import write_client_tasks, mark_tasks_inactive
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -228,7 +229,7 @@ def _resolve_client_id(client_slug):
         conn.close()
 
 
-def build_task_record(task, messages_by_task, attachments_by_task):
+def build_task_record(task, messages_by_task, attachments_by_task, existing_task_ids=frozenset()):
     msgs = sorted(messages_by_task.get(task["id"], []), key=lambda m: str(m.get("date") or ""))
     events = []
     for msg in msgs:
@@ -254,20 +255,34 @@ def build_task_record(task, messages_by_task, attachments_by_task):
         for att in attachments_by_task.get(task["id"], [])
     ]
 
+    task_name = str(task.get("name") or "Untitled Task")
+    description = strip_html(task.get("description"))
+    # odoo_fetcher refetches every task (active + inactive) for a client on every 2-hour
+    # sweep, not just new ones -- and access_tier is excluded from write_client_tasks'
+    # DO UPDATE SET (same as every other tiered table), so reclassifying an already-seen
+    # task would just be a wasted API call whose result gets silently discarded. Only
+    # classify tasks this client_id hasn't been seen for before.
+    if task["id"] in existing_task_ids:
+        access_tier = None
+    else:
+        tier_context = f"Implementation task: {task_name}\nDescription (truncated):\n{description or ''}"
+        access_tier = classify_tier(tier_context)
+
     return {
         "odoo_task_id": task["id"],
         "project_name": m2o_name(task.get("project_id")),
-        "task_name": str(task.get("name") or "Untitled Task"),
+        "task_name": task_name,
         "stage": m2o_name(task.get("stage_id")),
         "owner": m2o_name(task.get("user_id")),
         "priority": "High" if str(task.get("priority")) in ("1", "true", "True") else "Normal",
         "kanban_state": task.get("kanban_state") or "normal",
         "active": bool(task.get("active", True)),
-        "description": strip_html(task.get("description")),
+        "description": description,
         "task_created_date": (str(task.get("create_date") or "")[:10] or None),
         "task_updated_date": (str(task.get("write_date") or "")[:10] or None),
         "deadline": (str(task.get("date_deadline") or "")[:10] or None),
         "generated_at": now_utc(),
+        "access_tier": access_tier,
         "events": events,
         "attachments": attachments,
     }
@@ -331,7 +346,17 @@ def process_client(cfg, *, dry_run=False):
             if tid:
                 attachments_by_task.setdefault(tid, []).append(att)
 
-    task_records = [build_task_record(t, messages_by_task, attachments_by_task) for t in tasks]
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT odoo_task_id FROM implementation_tasks WHERE client_id = %s", (client_id,))
+            existing_task_ids = {row["odoo_task_id"] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+    task_records = [
+        build_task_record(t, messages_by_task, attachments_by_task, existing_task_ids) for t in tasks
+    ]
 
     if dry_run:
         logger.info("[dry-run] client=%s would write %d tasks", cfg["id"], len(task_records))

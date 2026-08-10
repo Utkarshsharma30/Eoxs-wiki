@@ -1,7 +1,10 @@
 [Unit]
 Description=eoxs-wiki-db wiki-ingestion pipeline (detect+ingest -> consolidate -> review)
-After=network.target postgresql.service eoxs-ingestion.service
-Wants=postgresql.service
+# eoxs-wiki-mcp.service must be up first -- every claude -p sub-agent this
+# pipeline spawns connects to it over HTTP/SSE (see wiki_ingestion/
+# mcp_http_server.py and headless_agent.py's 2026-08 incident note).
+After=network.target postgresql.service eoxs-ingestion.service eoxs-wiki-mcp.service
+Wants=postgresql.service eoxs-wiki-mcp.service
 
 [Service]
 Type=oneshot

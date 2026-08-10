@@ -32,7 +32,12 @@ from psycopg2.extras import Json
 
 
 def write_client_tasks(conn, *, client_id, tasks):
-    """tasks: list of dicts with task fields + 'events': [...] + 'attachments': [...].
+    """tasks: list of dicts with task fields + 'events': [...] + 'attachments': [...] +
+    optional 'access_tier' (caller's responsibility to classify, via
+    ingestion.inline_tier_classifier -- defaults to 'tier1', fail closed, if omitted).
+    access_tier is only applied on the INITIAL insert (excluded from DO UPDATE SET
+    below), matching every other tiered table's convention -- see write_implementation.py's
+    module docstring for why this table in particular needed that guarantee explicit.
     Returns the number of tasks written (from the live connection's
     perspective when called via dual_write)."""
     with conn.cursor() as cur:
@@ -42,8 +47,8 @@ def write_client_tasks(conn, *, client_id, tasks):
                 INSERT INTO implementation_tasks (
                     client_id, odoo_task_id, project_name, task_name, stage, owner,
                     priority, kanban_state, active, description, task_created_date,
-                    task_updated_date, deadline, generated_at
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    task_updated_date, deadline, generated_at, access_tier
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (client_id, odoo_task_id) DO UPDATE SET
                     project_name = EXCLUDED.project_name,
                     task_name = EXCLUDED.task_name,
@@ -65,7 +70,7 @@ def write_client_tasks(conn, *, client_id, tasks):
                     task.get("stage"), task.get("owner"), task.get("priority"),
                     task.get("kanban_state"), task.get("active", True), task.get("description"),
                     task.get("task_created_date"), task.get("task_updated_date"), task.get("deadline"),
-                    task.get("generated_at"),
+                    task.get("generated_at"), task.get("access_tier") or "tier1",
                 ),
             )
             task_id = cur.fetchone()["id"]

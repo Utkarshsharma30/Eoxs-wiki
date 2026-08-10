@@ -31,7 +31,10 @@ from ingestion.db import get_live_conn
 from mcp_server.db import query as db_query, query_one as db_query_one
 from mcp_server import server as read_tools
 
-server = Server("wiki-consolidation-agent")
+# 2026-08 transport change: build_consolidate_server() below is now a
+# factory, built fresh per SSE connection by wiki_ingestion/mcp_http_server.py
+# instead of being spawned as a stdio subprocess per invocation. See
+# agent_mcp_server.py's module docstring for the full incident/rationale.
 
 
 def get_staging_page(staging_page_id):
@@ -104,56 +107,63 @@ WRITE_TOOLS = {
     "merge_staging_pages": merge_staging_pages,
 }
 
-READ_TOOLS = dict(read_tools.TOOLS)
-TOOLS = {**READ_TOOLS, **WRITE_TOOLS}
+TOOLS = {**dict(read_tools.TOOLS), **WRITE_TOOLS}
+
+TOOL_DEFS = [
+    Tool(
+        name="get_staging_page",
+        description="Read one staging draft's full content (body, tags, entity_class, sources_raw) "
+                    "plus its citations, flags, and links, by staging page id.",
+        inputSchema={"type": "object", "properties": {
+            "staging_page_id": {"type": "integer"},
+        }, "required": ["staging_page_id"]},
+    ),
+    Tool(
+        name="merge_staging_pages",
+        description="Merge duplicate_ids into keep_id: reassigns their citations/flags/links onto keep_id, "
+                    "overwrites keep_id's body/tags/entity_class/sources_raw with your synthesized merge "
+                    "(don't just concatenate -- deduplicate overlapping content, keep genuinely distinct "
+                    "sub-topics, flag any contradictions you find between the duplicates), then deletes "
+                    "duplicate_ids. Call this exactly once per duplicate group.",
+        inputSchema={"type": "object", "properties": {
+            "keep_id": {"type": "integer"},
+            "duplicate_ids": {"type": "array", "items": {"type": "integer"}},
+            "merged_body": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "entity_class": {"type": "string"},
+            "sources_raw": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["keep_id", "duplicate_ids", "merged_body"]},
+    ),
+]
 
 
-@server.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="get_staging_page",
-            description="Read one staging draft's full content (body, tags, entity_class, sources_raw) "
-                        "plus its citations, flags, and links, by staging page id.",
-            inputSchema={"type": "object", "properties": {
-                "staging_page_id": {"type": "integer"},
-            }, "required": ["staging_page_id"]},
-        ),
-        Tool(
-            name="merge_staging_pages",
-            description="Merge duplicate_ids into keep_id: reassigns their citations/flags/links onto keep_id, "
-                        "overwrites keep_id's body/tags/entity_class/sources_raw with your synthesized merge "
-                        "(don't just concatenate -- deduplicate overlapping content, keep genuinely distinct "
-                        "sub-topics, flag any contradictions you find between the duplicates), then deletes "
-                        "duplicate_ids. Call this exactly once per duplicate group.",
-            inputSchema={"type": "object", "properties": {
-                "keep_id": {"type": "integer"},
-                "duplicate_ids": {"type": "array", "items": {"type": "integer"}},
-                "merged_body": {"type": "string"},
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "entity_class": {"type": "string"},
-                "sources_raw": {"type": "array", "items": {"type": "string"}},
-            }, "required": ["keep_id", "duplicate_ids", "merged_body"]},
-        ),
-    ] + await read_tools.list_tools()
+def build_consolidate_server():
+    """Fresh Server instance per call -- see module docstring."""
+    srv = Server("wiki-consolidation-agent")
+
+    @srv.list_tools()
+    async def list_tools():
+        return TOOL_DEFS + read_tools._tool_defs()
+
+    @srv.call_tool()
+    async def call_tool(name, arguments):
+        if name not in TOOLS:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        func = TOOLS[name]
+        try:
+            result = func(**(arguments or {}))
+        except Exception as e:
+            result = {"error": f"{type(e).__name__}: {e}"}
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    return srv
 
 
-@server.call_tool()
-async def call_tool(name, arguments):
-    if name not in TOOLS:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-    func = TOOLS[name]
-    try:
-        result = func(**(arguments or {}))
-    except Exception as e:
-        result = {"error": f"{type(e).__name__}: {e}"}
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
-
-
-async def main():
+async def _main():
+    srv = build_consolidate_server()
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await srv.run(read_stream, write_stream, srv.create_initialization_options())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_main())

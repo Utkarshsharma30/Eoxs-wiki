@@ -12,8 +12,14 @@ runs once against live and once against staging.
 
 def write_call(conn, *, source, external_id, meeting_title, call_date, duration_seconds,
                 duration_human, host_email, participants, recording_url, fireflies_summary,
-                key_topics, action_items, tags, generated_at, client_id, transcript_body, segments):
+                key_topics, action_items, tags, generated_at, client_id, transcript_body, segments,
+                access_tier="tier1"):
     """segments: list of dicts {segment_order, speaker, text}.
+    access_tier: caller's responsibility to classify (ingestion.inline_tier_classifier).
+    Only applied on the INITIAL insert (excluded from DO UPDATE SET below) -- in practice
+    existing_call() dedup means calls are never re-upserted anyway (immutable once
+    transcribed), but kept consistent with every other tiered table's convention. Defaults
+    to 'tier1' (fail closed).
     Returns the call's DB id (from the live connection's perspective when
     called via dual_write; staging's return value is discarded by the caller)."""
     with conn.cursor() as cur:
@@ -23,8 +29,8 @@ def write_call(conn, *, source, external_id, meeting_title, call_date, duration_
                 source, external_id, meeting_title, call_date, duration_seconds,
                 duration_human, host_email, participants, recording_url,
                 fireflies_summary, key_topics, action_items, tags, generated_at,
-                client_id, transcript_body, source_file_path, source_file_mtime
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
+                client_id, transcript_body, access_tier, source_file_path, source_file_mtime
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
             ON CONFLICT (source, external_id) WHERE source_file_path IS NULL DO UPDATE SET
                 meeting_title = EXCLUDED.meeting_title,
                 call_date = EXCLUDED.call_date,
@@ -47,7 +53,7 @@ def write_call(conn, *, source, external_id, meeting_title, call_date, duration_
                 source, external_id, meeting_title, call_date, duration_seconds,
                 duration_human, host_email, participants, recording_url,
                 fireflies_summary, key_topics, action_items, tags, generated_at,
-                client_id, transcript_body,
+                client_id, transcript_body, access_tier,
             ),
         )
         call_id = cur.fetchone()["id"]

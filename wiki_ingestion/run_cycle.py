@@ -22,9 +22,12 @@ run_agent()'s own never-raises contract.
 import json
 
 from ingestion.db import get_live_conn
+from ingestion.state import now_utc
 from wiki_ingestion.detect import build_all_candidates, run_detection
 from wiki_ingestion.run_agent import run_agent
-from wiki_ingestion.linear_report import report_cycle
+from wiki_ingestion.linear_report import (
+    start_cycle_parent, finish_cycle_parent, start_batch_task, finish_batch_task,
+)
 
 # Rows per sub-agent call. Chosen to keep each call's candidate list (and
 # the resulting need to pull full context on each via read tools) small
@@ -45,6 +48,29 @@ def _start_cycle():
         conn.close()
 
 
+def _set_cycle_linear_parent(cycle_id, issue_id):
+    if not issue_id:
+        return
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE wiki_ingest_cycles SET linear_parent_issue_id = %s WHERE id = %s", (issue_id, cycle_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_cycle_linear_parent(cycle_id):
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT linear_parent_issue_id FROM wiki_ingest_cycles WHERE id = %s", (cycle_id,))
+            row = cur.fetchone()
+            return row["linear_parent_issue_id"] if row else None
+    finally:
+        conn.close()
+
+
 def _finish_cycle(cycle_id, status, summary):
     conn = get_live_conn()
     try:
@@ -58,13 +84,13 @@ def _finish_cycle(cycle_id, status, summary):
         conn.close()
 
 
-def _start_batch(cycle_id, source_kind, row_count):
+def _start_batch(cycle_id, source_kind, row_count, linear_issue_id=None):
     conn = get_live_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO wiki_ingest_batches (cycle_id, source_kind, row_count) VALUES (%s, %s, %s) RETURNING id",
-                (cycle_id, source_kind, row_count),
+                "INSERT INTO wiki_ingest_batches (cycle_id, source_kind, row_count, linear_issue_id) VALUES (%s, %s, %s, %s) RETURNING id",
+                (cycle_id, source_kind, row_count, linear_issue_id),
             )
             batch_id = cur.fetchone()["id"]
         conn.commit()
@@ -97,14 +123,19 @@ def run_cycle(advance_cursors=True, timeout_seconds=1200):
     raises -- a batch failure is recorded and the driver moves on to the
     next chunk, matching run_agent()'s never-raises contract."""
     cycle_id = _start_cycle()
+    parent_issue_id = start_cycle_parent(cycle_id)
+    _set_cycle_linear_parent(cycle_id, parent_issue_id)
     partitions = run_detection(cycle_id, advance_cursors=advance_cursors)
 
     batches = []
     for source_kind, rows in partitions.items():
         chunks = _chunk(rows, CHUNK_SIZE)
         for chunk_index, chunk_rows in enumerate(chunks):
-            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows))
+            task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
+            since_ts = now_utc()
+            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
             result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
+            finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
             label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]" if len(chunks) > 1 else source_kind
             if result["ok"]:
                 _finish_batch(batch_id, "done")
@@ -121,9 +152,10 @@ def run_cycle(advance_cursors=True, timeout_seconds=1200):
         "batches": batches,
     }
     cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(batches) and batches else "done"
+    summary["status"] = cycle_status
     _finish_cycle(cycle_id, cycle_status, summary)
-    result = {"cycle_id": cycle_id, "status": cycle_status, **summary}
-    report_cycle(result)
+    finish_cycle_parent(parent_issue_id, cycle_id, summary)
+    result = {"cycle_id": cycle_id, **summary}
     return result
 
 
@@ -206,6 +238,11 @@ def resume_cycle(cycle_id, timeout_seconds=1200):
     orphaned = _reap_orphaned_batches(cycle_id)
     done_counts = _done_chunk_counts(cycle_id)
 
+    parent_issue_id = _get_cycle_linear_parent(cycle_id)
+    if not parent_issue_id:
+        parent_issue_id = start_cycle_parent(cycle_id)
+        _set_cycle_linear_parent(cycle_id, parent_issue_id)
+
     partitions = build_all_candidates()
 
     new_batches = []
@@ -218,8 +255,11 @@ def resume_cycle(cycle_id, timeout_seconds=1200):
             continue
         for chunk_index in range(start_index, len(chunks)):
             chunk_rows = chunks[chunk_index]
-            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows))
+            task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
+            since_ts = now_utc()
+            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
             result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
+            finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
             label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]"
             if result["ok"]:
                 _finish_batch(batch_id, "done")
@@ -238,9 +278,10 @@ def resume_cycle(cycle_id, timeout_seconds=1200):
         "batches": all_batches,
     }
     cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(all_batches) and all_batches else "done"
+    summary["status"] = cycle_status
     _finish_cycle(cycle_id, cycle_status, summary)
-    result = {"cycle_id": cycle_id, "status": cycle_status, **summary}
-    report_cycle(result)
+    finish_cycle_parent(parent_issue_id, cycle_id, summary)
+    result = {"cycle_id": cycle_id, **summary}
     return result
 
 

@@ -25,6 +25,7 @@ from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc
 from ingestion.call_relevance import is_call_relevant
 from ingestion.write_call import write_call, existing_call
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -250,6 +251,10 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 counts["written_items"].append(meeting.get("title") or "(untitled)")
                 continue
 
+            tier_context = (
+                f"Call title: {meeting.get('title')}\n"
+                f"Summary/transcript (truncated):\n{transcript_body}"
+            )
             dual_write(
                 write_call,
                 source=SOURCE, external_id=recording_id,
@@ -262,6 +267,7 @@ def process_fathom(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 fireflies_summary=None, key_topics=[], action_items=[],
                 tags=["call", SOURCE], generated_at=now_utc(), client_id=None,
                 transcript_body=transcript_body, segments=segments,
+                access_tier=classify_tier(tier_context),
             )
             counts["written"] += 1
             counts["written_items"].append(meeting.get("title") or "(untitled)")

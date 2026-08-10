@@ -1,13 +1,13 @@
 """Recurring wiki-ingestion pipeline: Phase 3 (detect+ingest) -> Phase 4
-(consolidate) -> Phase 5 (review), run sequentially as one call. This is
-what deploy/eoxs-wiki-pipeline.timer invokes every 6 hours -- the
-"6-hourly review sweep" cadence from the confirmed phase plan.
+(consolidate) -> Phase 5 (review) -> promotion, run sequentially as one
+call. This is what deploy/eoxs-wiki-pipeline.timer invokes every 6 hours
+-- the "6-hourly review sweep" cadence from the confirmed phase plan.
 
-Deliberately stops after review. Promotion (wiki_ingestion/promote.py)
-is NOT called here -- explicit instruction: promotion stays human-gated
-for now, reviewed pages wait for someone to call
-promote.promote_reviewed_pages() on purpose. Wire that in here (or a
-separate timer) once that trust is established.
+2026-08 change: run_review_sweep() now calls promote_reviewed_pages()
+itself at the end of every sweep (see wiki_ingestion/run_review.py and
+promote.py) -- reviewed pages go live automatically, no separate wiring
+needed here. Rejected pages are never touched by promotion; they still
+require a human decision.
 
 Consolidation and review run over ALL current staging drafts, not just
 this run's new cycle -- same as when run standalone -- so a draft that

@@ -1,9 +1,19 @@
 """Phase 5: review-sweep driver. Runs one headless sub-agent per chunk of
 draft staging pages, each spot-checking citations and content quality,
 then marking every page in its chunk 'reviewed' or 'rejected' via
-review_mcp_server.py. Promotion to live is a deliberately separate,
-human-gated step (wiki_ingestion/promote.py) -- this driver never calls
-it, so a review sweep can never itself push anything live.
+review_mcp_server.py.
+
+2026-08 change: promotion to live now runs AUTOMATICALLY right after
+every sweep, for every page the review agent approved -- no human gate
+for the 'reviewed' outcome anymore (see wiki_ingestion/promote.py,
+whose own docstring covers the history of this). Rejected pages are
+NEVER auto-promoted and still require a human decision; only the
+approve path was automated. This was a deliberate choice, not an
+oversight -- see the Linear reporting in linear_report.py's
+finish_review_task/report_promotion for how "needs a human" (rejected)
+and "already live" (promoted) are now tracked as distinct, filterable
+Linear states ("Needs Human Attention" / "Pushed to Live") rather than
+everything landing in one generic Done/Todo bucket.
 
 Chunks run sequentially, same reasoning as Phase 3/4 (2 CPU cores, each
 call is a real `claude -p` process). A chunk failure never aborts the
@@ -13,8 +23,12 @@ stay 'draft' for the next sweep to retry.
 import json
 
 from wiki_ingestion.review import chunk_rows, find_draft_pages
-from wiki_ingestion.headless_agent import run_headless_agent
-from wiki_ingestion.linear_report import report_review
+from wiki_ingestion.headless_agent import run_headless_agent, WIKI_MCP_BASE_URL
+from wiki_ingestion.linear_report import (
+    start_review_parent, finish_review_parent, start_review_task, finish_review_task,
+    report_pending_drafts_board,
+)
+from wiki_ingestion.promote import promote_reviewed_pages
 
 PROMPT_TEMPLATE = """You are a wiki-review sub-agent for eoxs-wiki-db, EOXS's second-brain database.
 
@@ -53,27 +67,36 @@ def build_prompt(rows):
     return PROMPT_TEMPLATE.format(count=len(rows), row_list=row_list)
 
 
-def run_review_chunk(rows, timeout_seconds=1200, max_attempts=3, retry_delay_seconds=5):
+def run_review_chunk(rows, timeout_seconds=1200, max_attempts=5, retry_delay_seconds=10):
     prompt = build_prompt(rows)
+    url = f"{WIKI_MCP_BASE_URL}/wiki-review/sse"
     return run_headless_agent(
-        "wiki_ingestion.review_mcp_server", {}, prompt,
+        url, prompt,
         timeout_seconds=timeout_seconds, max_attempts=max_attempts, retry_delay_seconds=retry_delay_seconds,
     )
 
 
 def run_review_sweep(timeout_seconds=1200):
-    """Runs one full review sweep over every current draft page. Returns a
-    summary dict; never raises -- a chunk failure is recorded and the
-    driver moves on, matching run_headless_agent's never-raises contract.
-    Promotion is NOT run automatically at the end of this -- see module
-    docstring."""
+    """Runs one full review sweep over every current draft page, then
+    immediately promotes everything that ended up 'reviewed' -- not just
+    from this sweep, but any page anywhere in that status (same query
+    promote_reviewed_pages() has always used; this just means it now
+    runs on a schedule instead of only when a human calls it by hand).
+    Returns a summary dict including both the review and promotion
+    results; never raises -- a chunk or promotion failure is recorded
+    and the driver moves on."""
     rows = find_draft_pages()
     chunks = chunk_rows(rows)
 
+    parent_issue_id = start_review_parent(len(rows)) if rows else None
+
     results = []
     for i, chunk in enumerate(chunks):
+        task_issue_id = start_review_task(parent_issue_id, i, len(chunks), chunk)
+        page_ids = [r["id"] for r in chunk]
         result = run_review_chunk(chunk, timeout_seconds=timeout_seconds)
-        entry = {"chunk_index": i, "page_ids": [r["id"] for r in chunk], "ok": result["ok"]}
+        finish_review_task(task_issue_id, i, len(chunks), page_ids, result)
+        entry = {"chunk_index": i, "page_ids": page_ids, "ok": result["ok"]}
         if not result["ok"]:
             entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
         results.append(entry)
@@ -84,7 +107,15 @@ def run_review_sweep(timeout_seconds=1200):
         "chunks_failed": sum(1 for r in results if not r["ok"]),
         "results": results,
     }
-    report_review(result)
+    if parent_issue_id:
+        finish_review_parent(parent_issue_id, result)
+
+    # Auto-promotion -- every page currently 'reviewed' (this sweep's
+    # approvals plus anything left over from before) goes live now.
+    # promote_reviewed_pages() reports its own Linear issue ("Pushed to
+    # Live" state) and refreshes the pending-drafts board itself, so no
+    # separate board-refresh call is needed here anymore.
+    result["promotion"] = promote_reviewed_pages()
     return result
 
 

@@ -1,75 +1,110 @@
-"""Text extraction for email/ticket attachments -- shared by the live
-fetchers (gmail_fetcher.py, zoho_fetcher.py, called at ingestion time) and
-ingestion/backfill_attachments.py (called against already-ingested rows).
+"""Extracts readable text from downloaded attachment bytes. Supports the
+formats that actually show up in real ingested mail in meaningful volume
+(checked live against real data before choosing this list): pdf, docx,
+xlsx, csv. Legacy .doc/.xls (pre-2007 binary Office formats) and images
+are explicitly out of scope -- .doc/.xls would need a different library
+for a handful of real instances, and images need OCR, a genuinely
+separate project. Both degrade to a clear, honest "not supported" note
+rather than silently doing nothing.
 
-Scope: PDF, DOCX, XLSX, TXT, CSV only. Images, .ics invites, archives, and
-other binary formats are deliberately out of scope (no OCR) -- callers
-still get mimetype/source_attachment_id filled from free API metadata for
-those, just no extracted_text.
+Never raises -- a single bad attachment (corrupted file, unexpected
+internal structure, password-protected) degrades to a short bracketed
+note stored in the same place real extracted text would go, so a caller
+never needs a separate try/except and a query for "did extraction
+actually happen" is just "is extracted_text NULL" (not attempted, e.g.
+an unsupported binary format skipped before download) vs "here's what
+happened" (a real value, success or an explained failure).
 """
+import csv
 import io
-import os
+import logging
 
-import docx
-import openpyxl
-import pypdf
+logger = logging.getLogger("ingestion.attachment_extract")
 
-MAX_EXTRACT_BYTES = 20 * 1024 * 1024
+MAX_EXTRACT_CHARS = 50000  # generous cap -- keeps one huge spreadsheet from dominating a row indefinitely
+
+SUPPORTED_EXTENSIONS = {"pdf", "docx", "xlsx", "csv"}
 
 
-def _extract_pdf_text(data):
+def _extract_pdf(data):
+    import pypdf
     reader = pypdf.PdfReader(io.BytesIO(data))
-    parts = [page.extract_text() or "" for page in reader.pages]
-    text = "\n".join(p for p in parts if p).strip()
-    return text or None
+    pages = []
+    for i, page in enumerate(reader.pages):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append(f"--- page {i + 1} ---\n{text}")
+    return "\n\n".join(pages)
 
 
-def _extract_docx_text(data):
-    document = docx.Document(io.BytesIO(data))
-    text = "\n".join(p.text for p in document.paragraphs if p.text).strip()
-    return text or None
+def _extract_docx(data):
+    import docx
+    doc = docx.Document(io.BytesIO(data))
+    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n".join(parts)
 
 
-def _extract_xlsx_text(data):
+def _extract_xlsx(data):
+    import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-    lines = []
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None]
-            if cells:
-                lines.append("\t".join(cells))
-    return "\n".join(lines).strip() or None
+    sections = []
+    for sheet in wb.worksheets:
+        rows = []
+        for row in sheet.iter_rows(values_only=True):
+            if any(c is not None for c in row):
+                rows.append(" | ".join("" if c is None else str(c) for c in row))
+        if rows:
+            sections.append(f"--- sheet: {sheet.title} ---\n" + "\n".join(rows))
+    return "\n\n".join(sections)
 
 
-def _extract_plain_text(data):
-    for encoding in ("utf-8", "latin-1"):
-        try:
-            return data.decode(encoding).strip() or None
-        except UnicodeDecodeError:
-            continue
-    return None
+def _extract_csv(data):
+    text = data.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    return "\n".join(" | ".join(row) for row in reader)
 
 
-EXTRACTORS = {
-    ".pdf": _extract_pdf_text,
-    ".docx": _extract_docx_text,
-    ".xlsx": _extract_xlsx_text,
-    ".txt": _extract_plain_text,
-    ".csv": _extract_plain_text,
+_EXTRACTORS = {
+    "pdf": _extract_pdf,
+    "docx": _extract_docx,
+    "xlsx": _extract_xlsx,
+    "csv": _extract_csv,
 }
 
 
-def is_extractable(filename):
-    return os.path.splitext(filename)[1].lower() in EXTRACTORS
+def extractable(filename):
+    """Cheap pre-check, called before spending an API call downloading
+    the actual bytes -- no point fetching a binary this module can't do
+    anything with."""
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    return ext in SUPPORTED_EXTENSIONS
 
 
-def extract_text(data, filename):
-    """Returns extracted text, or None for unsupported types, oversized
-    data, or a genuinely empty extraction result. Postgres text columns
-    reject NUL bytes, which some PDF extractions produce -- stripped here
-    so a real bug elsewhere can't lose an otherwise-good extraction."""
-    extractor = EXTRACTORS.get(os.path.splitext(filename)[1].lower())
-    if not extractor or len(data) > MAX_EXTRACT_BYTES:
-        return None
-    text = extractor(data)
-    return text.replace("\x00", "") if text else text
+def extract_text(filename, data):
+    """Returns extracted text, or a short bracketed explanatory note --
+    never raises, never returns None or empty."""
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    extractor = _EXTRACTORS.get(ext)
+    if not extractor:
+        if ext in ("xls", "doc"):
+            return f"[legacy .{ext} format not supported for extraction -- re-save as .{ext}x to enable this]"
+        return f"[unsupported format for text extraction: .{ext or 'unknown'}]"
+    try:
+        text = extractor(data)
+        # Postgres text columns reject embedded NUL bytes outright ("A
+        # string literal cannot contain NUL (0x00) characters") -- some
+        # malformed/corrupted source PDFs decode to text containing them.
+        # Stripping here (not just at the DB-write call site) means every
+        # caller gets a value that's always safely storable.
+        text = text.replace("\x00", "")
+        if not text.strip():
+            return "[no extractable text found -- file may be empty, scanned/image-based, or password-protected]"
+        return text[:MAX_EXTRACT_CHARS]
+    except Exception as e:
+        logger.warning("attachment extraction failed for %s: %s", filename, e)
+        return f"[extraction failed: {type(e).__name__}]"

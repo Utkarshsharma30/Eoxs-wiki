@@ -32,6 +32,7 @@ from ingestion.state import sync_since, set_last_synced_at, now_utc
 from ingestion.call_relevance import is_call_relevant
 from ingestion.routing import load_client_index, classify_client
 from ingestion.write_call import write_call, existing_call
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.retry import call_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -278,6 +279,10 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 counts["written_items"].append(detail.get("title") or "(untitled)")
                 continue
 
+            tier_context = (
+                f"Call title: {detail.get('title')}\n"
+                f"Summary/transcript (truncated):\n{overview or transcript_body}"
+            )
             dual_write(
                 write_call,
                 source=SOURCE, external_id=external_id,
@@ -291,6 +296,7 @@ def process_fireflies(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 fireflies_summary=overview, key_topics=key_topics, action_items=action_items,
                 tags=["call", SOURCE], generated_at=now_utc(), client_id=client_id,
                 transcript_body=transcript_body, segments=segments,
+                access_tier=classify_tier(tier_context),
             )
             counts["written"] += 1
             counts["written_items"].append(detail.get("title") or "(untitled)")

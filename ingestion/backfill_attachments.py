@@ -1,384 +1,321 @@
-"""Backfills email_attachments.source_attachment_id/mimetype/extracted_text
-for rows written before migration 024 added those columns -- original
-Gmail/Zoho ingestion only ever captured filename/size metadata (see
-schema/015's comment), so the provider's own attachment id was never
-stored and has to be re-derived by re-fetching each thread.
+"""One-time historical backfill for the attachment-extraction feature
+(schema/024 + the download/extract wiring added to gmail_fetcher.py/
+zoho_fetcher.py). Every thread ingested before that change has
+attachments with source_attachment_id/mimetype/extracted_text all NULL
+-- this re-fetches those threads from the live Gmail/Zoho APIs and
+rewrites them with write_thread(), which now captures all three.
 
-Operates per-thread (not per-attachment) to keep API calls cheap: a single
-Gmail threads.get(format="full") or Zoho message-content fetch returns
-every part's mimeType/attachmentId for free, so bytes are only downloaded
-for attachments whose extension is in EXTRACTORS and whose size is under
-MAX_EXTRACT_BYTES. Non-extractable types (images, .ics, archives, ...)
-still get source_attachment_id/mimetype filled from the free metadata.
+Deliberately bypasses process_account's/process_zoho's normal
+already-seen/stale skip logic -- that logic exists to avoid reprocessing
+UNCHANGED threads on the recurring sweep, which is exactly what a
+backfill needs to do to reach attachments that were already ingested
+under the old flow. Does NOT touch is_message_seen/last_synced_at state
+-- those drive the incremental recurring sweep's cursor and must not
+move because of a backfill pass.
 
-DB rows are matched to freshly-fetched provider parts within the same
-message: first by exact normalized filename, then (for whatever's left)
-by a hash-suffix-stripped fallback -- see normalize_filename/
-dehashed_filename for why both passes are needed. A DB row with no
-matching provider part (message or attachment deleted upstream since
-original ingestion) is counted "gone" and left untouched, never guessed.
+access_tier is looked up from the existing row and passed straight
+through -- write_thread's ON CONFLICT clause never updates access_tier
+on an existing thread anyway (so this is technically redundant with that
+guard), but doing it explicitly means a backfill run is never the one
+LLM-calling classify_tier() ~8000 times over data whose tier was already
+decided.
 
-Usage:
-    python -m ingestion.backfill_attachments --account raj_gmail --shard-index 0 --shard-count 6
-    python -m ingestion.backfill_attachments --zoho
+Bonus effect of the full-thread rewrite (not incidental -- this is why
+rewrite-the-whole-thread was chosen over a row-level UPDATE): legacy
+attachment filenames from the old markdown-vault loader were stored
+wrapped as "[real-name.pdf](attachments/.../real-name.pdf)", which broke
+extractable()'s extension check (extension came out "pdf)"). A fresh
+Gmail/Zoho API fetch produces the real, clean filename directly, so the
+backfill fixes that data-quality bug for free everywhere it rewrites.
+
+Resumable by construction: the "needs backfill" query only selects
+threads with a NULL source_attachment_id attachment, so an interrupted
+run picks up exactly where it left off if re-invoked, no separate
+checkpoint file needed.
+
+Usage: python -m ingestion.backfill_attachments [--account NAME] [--limit N]
+       python -m ingestion.backfill_attachments --zoho
 """
 import argparse
-import base64
 import logging
 import mimetypes
 import os
 import re
-import sys
 import time
-from collections import defaultdict
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from ingestion.db import dual_write, get_live_conn
+from ingestion.gmail_fetcher import get_gmail_service, fetch_thread_detail, ACCOUNTS
+from ingestion.zoho_fetcher import ZohoClient, build_thread_groups, decode_zoho_body, extractable, extract_text, MAX_ATTACHMENT_DOWNLOAD_BYTES
+from ingestion.write_email import write_thread
+from ingestion.routing import load_client_index, classify_client
+from ingestion.state import now_utc
 
-from google.auth.exceptions import TransportError
-from googleapiclient.errors import HttpError
-
-from ingestion.attachment_extract import MAX_EXTRACT_BYTES, extract_text
-from ingestion.db import get_live_conn
-from ingestion.gmail_fetcher import ACCOUNTS, GMAIL_NUM_RETRIES, find_gmail_attachment_parts, get_gmail_service
-from ingestion.retry import call_with_retry
-from ingestion.zoho_fetcher import ZohoClient, build_thread_groups
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.backfill_attachments")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-PROGRESS_EVERY = 25
-MARKDOWN_LINK_RE = re.compile(r"^\[(?P<name>.+)\]\(.*\)$")
+# The sibling old vault repo (/home/deploy/raj-wiki-vault, file-based, read
+# only -- never written to from here) still has the raw attachment files on
+# disk for most threads ingested before the DB-native rewrite, organized as
+# raw/emails/{account}/attachments/{gmail_thread_id}/{filename}. Checked
+# live: covers 86% of the extractable-format (pdf/docx/xlsx/csv) rows that
+# need backfilling. Reading these directly is a local file read instead of
+# a Gmail/Zoho API round trip -- worth doing as a fast first pass before
+# falling back to the API for whatever it doesn't cover (images/ics never
+# match here since this vault never stored those either -- expected, not a
+# gap; those still get source_attachment_id/mimetype from the API pass).
+OLD_VAULT_EMAILS_DIR = "/home/deploy/raj-wiki-vault/raw/emails"
 
-
-def clean_filename(raw):
-    """Old file-based-loader rows stored the raw markdown bullet
-    "[name](attachments/.../name)" verbatim as filename -- strip it back
-    to a bare name for matching against a provider's attachmentName."""
-    m = MARKDOWN_LINK_RE.match((raw or "").strip())
-    return m.group("name") if m else raw
-
-
-DROP_CHARS_RE = re.compile(r"[^\w\s-]")
-SEPARATOR_RE = re.compile(r"[_\s]+")
-MULTI_HYPHEN_RE = re.compile(r"-+")
-HASH_SUFFIX_RE = re.compile(r"^(?P<base>.+)-(?P<hash>[0-9a-f]{8,16})$")
+_MARKDOWN_LINK_RE = re.compile(r"^\[(.*?)\]\(.*\)$")
 
 
-def normalize_filename(name):
-    """The old file-based loader slugified filenames for filesystem safety
-    before storing them -- e.g. live Zoho
-    "Screenshot_23-7-2026_81847_discountpipesteel.eoxs.com.jpeg" was stored
-    as "screenshot-23-7-2026-81847-discountpipesteeleoxscom.jpeg": dots/
-    parens/etc. are dropped outright (no separator), while underscores and
-    whitespace become a single '-' (verified against several real rows,
-    both punctuation-drop and underscore-to-hyphen behave differently, so
-    a single "replace all non-alnum with '-'" rule under- or
-    over-separates depending on which case you check first). Matching on
-    raw filename against a freshly re-fetched provider part therefore
-    misses every old-loader row; both sides are normalized through this
-    same slug before comparing so DB-native rows (already close to their
-    live name) and old-loader rows (already slugified) land on the same
-    key."""
-    stem, ext = os.path.splitext(name or "")
-    stem = DROP_CHARS_RE.sub("", stem)
-    stem = SEPARATOR_RE.sub("-", stem)
-    stem = MULTI_HYPHEN_RE.sub("-", stem).strip("-").lower()
-    return f"{stem}{ext.lower()}"
+def _real_filename(filename):
+    """Legacy rows from the old markdown-vault loader stored filename as
+    "[real-name.pdf](attachments/.../real-name.pdf)" -- unwrap that back to
+    the real name so extension-based extractable()/extract_text() and the
+    on-disk lookup both work. A filename that was never wrapped this way
+    passes through unchanged."""
+    m = _MARKDOWN_LINK_RE.match(filename or "")
+    return m.group(1) if m else filename
 
 
-def dehashed_filename(normalized_name):
-    """The old loader also appended a short hex hash to disambiguate two
-    attachments in the same thread that slugify to the same name (e.g. the
-    same file re-attached in a later message) -- e.g.
-    "non-hdfc-disbursement-letters-1-0f60825c8f.xlsx". Live provider names
-    never carry this, so it's stripped for a fallback comparison after an
-    exact match fails."""
-    stem, ext = os.path.splitext(normalized_name)
-    m = HASH_SUFFIX_RE.match(stem)
-    return f"{m.group('base')}{ext}" if m else normalized_name
-
-
-def match_attachments(db_rows, api_parts):
-    """db_rows/api_parts: lists of (obj, raw_filename). Returns [(db_obj,
-    api_obj|None)] -- each db row matched at most once, preferring an exact
-    normalized-name match and falling back to a hash-stripped match (see
-    dehashed_filename) for whatever's left, both within this single
-    message's attachment list so unrelated messages never cross-match."""
-    api_entries = [
-        {"obj": obj, "exact": normalize_filename(name), "used": False}
-        for obj, name in api_parts
-    ]
-    for e in api_entries:
-        e["dehash"] = dehashed_filename(e["exact"])
-
-    pairs = []
-    unmatched = []
-    for obj, name in db_rows:
-        exact = normalize_filename(name)
-        match = next((e for e in api_entries if not e["used"] and e["exact"] == exact), None)
-        if match:
-            match["used"] = True
-            pairs.append((obj, match["obj"]))
-        else:
-            unmatched.append((obj, dehashed_filename(exact)))
-
-    for obj, dehash in unmatched:
-        match = next((e for e in api_entries if not e["used"] and e["dehash"] == dehash), None)
-        if match:
-            match["used"] = True
-            pairs.append((obj, match["obj"]))
-        else:
-            pairs.append((obj, None))
-    return pairs
-
-
-# --- shared DB helpers -------------------------------------------------------
-
-def update_attachment(conn, attachment_id, mimetype, source_attachment_id, extracted_text_value):
+def _update_attachment(conn, *, source_account, gmail_thread_id, old_filename, real_filename, mimetype, extracted_text):
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE email_attachments
-            SET mimetype = COALESCE(%s, mimetype),
-                source_attachment_id = COALESCE(%s, source_attachment_id),
-                extracted_text = COALESCE(%s, extracted_text)
-            WHERE id = %s
+            UPDATE email_attachments a SET filename = %s, mimetype = %s, extracted_text = %s
+            FROM email_threads t
+            WHERE a.thread_id = t.id AND t.source_account = %s AND t.gmail_thread_id = %s AND a.filename = %s
             """,
-            (mimetype, source_attachment_id, extracted_text_value, attachment_id),
+            (real_filename, mimetype, extracted_text, source_account, gmail_thread_id, old_filename),
         )
     conn.commit()
 
 
-def threads_needing_backfill(source_account):
+def backfill_from_local_vault(log_every=200):
+    """Fast path: fills extracted_text/mimetype (NOT source_attachment_id --
+    unobtainable from a local file, only the provider API has it) for every
+    extractable-format attachment whose file already exists in the old
+    vault. Row-level UPDATE keyed by (source_account, gmail_thread_id, old
+    filename), not thread rewrite -- much cheaper than the API path, and
+    safe to run before it (the later full API backfill still visits every
+    one of these threads for source_attachment_id and will simply
+    re-derive the same extracted_text from a fresh download, no conflict)."""
     conn = get_live_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT et.id, et.gmail_thread_id
-                FROM email_threads et
-                JOIN email_attachments ea ON ea.thread_id = et.id
-                WHERE et.source_account = %s
-                  AND (ea.source_attachment_id IS NULL OR ea.mimetype IS NULL)
-                ORDER BY et.id
-                """,
-                (source_account,),
-            )
-            return cur.fetchall()
+            cur.execute("""
+                SELECT t.source_account, t.gmail_thread_id, a.filename
+                FROM email_attachments a JOIN email_threads t ON t.id = a.thread_id
+                WHERE a.source_attachment_id IS NULL AND a.extracted_text IS NULL
+            """)
+            rows = cur.fetchall()
     finally:
         conn.close()
 
-
-def rows_needing_backfill(conn, thread_db_id):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT ea.id, ea.filename, ea.size_bytes, em.message_index
-            FROM email_attachments ea
-            JOIN email_messages em ON em.id = ea.message_id
-            WHERE ea.thread_id = %s AND (ea.source_attachment_id IS NULL OR ea.mimetype IS NULL)
-            ORDER BY ea.id
-            """,
-            (thread_db_id,),
-        )
-        return cur.fetchall()
-
-
-def log_progress(source, i, total, counts, started):
-    if i % PROGRESS_EVERY != 0 and i != total:
-        return
-    elapsed = time.monotonic() - started
-    rate = i / elapsed if elapsed else 0
-    eta_min = ((total - i) / rate / 60) if rate > 0 else 0.0
-    logger.info(
-        "%s progress %d/%d written=%d gone=%d error=%d elapsed=%ds eta=%.1fmin",
-        source, i, total, counts["written"], counts["gone"], counts["error"], int(elapsed), eta_min,
-    )
-
-
-# --- Gmail -------------------------------------------------------------------
-
-def _gmail_is_retryable(e):
-    if isinstance(e, HttpError):
-        return e.resp.status == 429 or e.resp.status >= 500
-    return isinstance(e, (TransportError, ConnectionError, TimeoutError))
-
-
-def _gmail_retry_after(e):
-    if isinstance(e, HttpError):
-        value = e.resp.get("retry-after")
-        if value is not None:
-            try:
-                return float(value)
-            except ValueError:
-                return None
-    return None
-
-
-def _gmail_execute(request):
-    return call_with_retry(
-        lambda: request.execute(num_retries=GMAIL_NUM_RETRIES),
-        is_retryable=_gmail_is_retryable, retry_after_getter=_gmail_retry_after,
-    )
-
-
-def fetch_thread_parts_by_message(service, gmail_thread_id):
-    """{message_index: [(part_obj, raw_filename), ...]}"""
-    thread = _gmail_execute(service.users().threads().get(userId="me", id=gmail_thread_id, format="full"))
-    parts_by_index = defaultdict(list)
-    for i, m in enumerate(thread.get("messages", [])):
-        message_index = i + 1
-        for part in find_gmail_attachment_parts(m["payload"]):
-            filename = part.get("filename") or f"attachment-{part.get('body', {}).get('attachmentId', '')}"
-            parts_by_index[message_index].append(({
-                "gmail_message_id": m["id"],
-                "attachment_id": part.get("body", {}).get("attachmentId"),
-                "mimetype": part.get("mimeType") or "application/octet-stream",
-                "size": part.get("body", {}).get("size") or 0,
-            }, filename))
-    return parts_by_index
-
-
-def download_gmail_attachment(service, message_id, attachment_id):
-    request = service.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id)
-    resp = _gmail_execute(request)
-    return base64.urlsafe_b64decode(resp["data"])
-
-
-def process_gmail_attachment(conn, service, db_row, api_part, counts):
-    extracted_text_value = None
-    if api_part["attachment_id"] and api_part["size"] <= MAX_EXTRACT_BYTES:
+    counts = {"updated": 0, "not_on_disk": 0, "skipped_unextractable": 0, "error": 0}
+    started = time.time()
+    for i, row in enumerate(rows, 1):
+        real_fn = _real_filename(row["filename"])
+        if not extractable(real_fn):
+            counts["skipped_unextractable"] += 1
+            continue
+        path = os.path.join(OLD_VAULT_EMAILS_DIR, row["source_account"], "attachments", row["gmail_thread_id"], real_fn)
+        if not os.path.isfile(path):
+            counts["not_on_disk"] += 1
+            continue
         try:
-            data = download_gmail_attachment(service, api_part["gmail_message_id"], api_part["attachment_id"])
-            extracted_text_value = extract_text(data, db_row["filename"])
+            with open(path, "rb") as f:
+                data = f.read()
+            text = extract_text(real_fn, data)
+            mimetype = mimetypes.guess_type(real_fn)[0]
+            dual_write(
+                _update_attachment,
+                source_account=row["source_account"], gmail_thread_id=row["gmail_thread_id"],
+                old_filename=row["filename"], real_filename=real_fn, mimetype=mimetype, extracted_text=text,
+            )
+            counts["updated"] += 1
         except Exception as e:
-            logger.warning("extract failed id=%s filename=%r: %s", db_row["id"], db_row["filename"], e)
-    try:
-        update_attachment(conn, db_row["id"], api_part["mimetype"], api_part["attachment_id"], extracted_text_value)
-        counts["written"] += 1
-    except Exception as e:
-        logger.error("db update failed id=%s: %s", db_row["id"], e)
-        counts["error"] += 1
-
-
-def process_account(account, shard_index, shard_count):
-    service = get_gmail_service(account)
-    all_threads = threads_needing_backfill(account)
-    shard = [t for t in all_threads if t["id"] % shard_count == shard_index]
-    total = len(shard)
-    logger.info("account=%s shard=%d/%d threads to backfill=%d", account, shard_index, shard_count, total)
-
-    counts = {"written": 0, "gone": 0, "error": 0}
-    started = time.monotonic()
-    for i, thread in enumerate(shard, 1):
-        conn = get_live_conn()
-        try:
-            db_rows = rows_needing_backfill(conn, thread["id"])
-            db_by_index = defaultdict(list)
-            for r in db_rows:
-                db_by_index[r["message_index"]].append((r, clean_filename(r["filename"])))
-
-            try:
-                api_by_index = fetch_thread_parts_by_message(service, thread["gmail_thread_id"])
-            except HttpError as e:
-                if e.resp.status == 404:
-                    counts["gone"] += len(db_rows)
-                    continue
-                raise
-
-            for message_index, db_items in db_by_index.items():
-                for db_row, api_part in match_attachments(db_items, api_by_index.get(message_index, [])):
-                    if api_part is None:
-                        counts["gone"] += 1
-                        continue
-                    process_gmail_attachment(conn, service, db_row, api_part, counts)
-        except Exception as e:
-            logger.error("thread %s failed: %s", thread["gmail_thread_id"], e)
+            logger.error("local-vault update failed for %s/%s/%s: %s", row["source_account"], row["gmail_thread_id"], real_fn, e)
             counts["error"] += 1
-        finally:
-            conn.close()
 
-        log_progress(f"account={account}", i, total, counts, started)
+        if i % log_every == 0 or i == len(rows):
+            elapsed = time.time() - started
+            logger.info("local-vault progress %d/%d updated=%d not_on_disk=%d skipped_unextractable=%d error=%d elapsed=%.0fs",
+                        i, len(rows), counts["updated"], counts["not_on_disk"], counts["skipped_unextractable"], counts["error"], elapsed)
 
-    logger.info("account=%s done: %s", account, counts)
+    logger.info("local-vault backfill done: %s", counts)
     return counts
 
 
-# --- Zoho ----------------------------------------------------------------
-
-def process_zoho_attachment(conn, client, db_row, api_att, counts):
-    clean_name = clean_filename(db_row["filename"])
-    mimetype = api_att.get("content_type") or mimetypes.guess_type(clean_name)[0] or "application/octet-stream"
-    attachment_id = api_att.get("attachment_id")
-    extracted_text_value = None
-    if attachment_id and api_att["size"] <= MAX_EXTRACT_BYTES:
-        try:
-            data = client.fetch_attachment_content(api_att["folder_id"], api_att["message_id"], attachment_id)
-            extracted_text_value = extract_text(data, clean_name)
-        except Exception as e:
-            logger.warning("zoho extract failed id=%s filename=%r: %s", db_row["id"], clean_name, e)
+def _threads_needing_backfill(source_account, limit=None, shard_index=None, shard_count=None):
+    conn = get_live_conn()
     try:
-        update_attachment(conn, db_row["id"], mimetype, attachment_id, extracted_text_value)
-        counts["written"] += 1
-    except Exception as e:
-        logger.error("zoho db update failed id=%s: %s", db_row["id"], e)
-        counts["error"] += 1
+        with conn.cursor() as cur:
+            sql = """
+                SELECT DISTINCT t.gmail_thread_id, t.access_tier
+                FROM email_threads t JOIN email_attachments a ON a.thread_id = t.id
+                WHERE t.source_account = %s AND a.source_attachment_id IS NULL
+                ORDER BY t.gmail_thread_id
+            """
+            params = [source_account]
+            if limit:
+                sql += " LIMIT %s"
+                params.append(limit)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    if shard_count:
+        # Deterministic partition by position in the (stable, ORDER BY'd)
+        # result -- each concurrent process handles a disjoint slice of the
+        # same account's threads, no coordination needed between shards.
+        # Python's built-in hash() is NOT used here: it's randomized per
+        # process (PYTHONHASHSEED), so two shard processes would compute
+        # different bucket assignments for the same thread id and could
+        # double-process or entirely skip it. Index-based slicing is
+        # correct because every shard runs the identical query.
+        rows = [r for i, r in enumerate(rows) if i % shard_count == shard_index]
+    return rows
 
 
-def process_zoho():
-    client = ZohoClient()
-    threads = threads_needing_backfill("support_zoho")
-    logger.info("zoho threads to backfill=%d", len(threads))
+def backfill_gmail(account, limit=None, log_every=25, shard_index=None, shard_count=None):
+    service = get_gmail_service(account)
+    client_index = load_client_index()
+    targets = _threads_needing_backfill(account, limit=limit, shard_index=shard_index, shard_count=shard_count)
+    logger.info("account=%s shard=%s/%s threads to backfill=%d", account, shard_index, shard_count, len(targets))
 
     counts = {"written": 0, "gone": 0, "error": 0}
-    if not threads:
-        logger.info("zoho backfill done: %s", counts)
-        return counts
-
-    messages = client.list_all_messages(after_epoch_ms=0, max_results=20000)
-    thread_groups = build_thread_groups(messages)
-    logger.info("zoho: fetched %d historical messages, %d distinct threads total", len(messages), len(thread_groups))
-
-    for thread in threads:
-        zoho_thread_id = thread["gmail_thread_id"].removeprefix("zoho-")
-        conn = get_live_conn()
+    started = time.time()
+    for i, row in enumerate(targets, 1):
+        thread_id = row["gmail_thread_id"]
         try:
-            db_rows = rows_needing_backfill(conn, thread["id"])
-            msgs = thread_groups.get(zoho_thread_id)
-            if not msgs:
-                logger.warning("zoho thread=%s not found in historical message list, skipping", thread["gmail_thread_id"])
-                counts["gone"] += len(db_rows)
+            detail = fetch_thread_detail(service, thread_id)
+            if not detail:
+                logger.warning("account=%s thread=%s no longer resolvable via API (deleted?), skipping", account, thread_id)
+                counts["gone"] += 1
                 continue
-
-            api_items = []
-            for m in sorted(msgs, key=lambda m: int(m.get("receivedTime", 0))):
-                if str(m.get("hasAttachment")) != "1":
-                    continue
-                for att in client.fetch_attachment_info(m["folderId"], m["messageId"]):
-                    name = att.get("attachmentName") or f"attachment-{att.get('attachmentId', '')}"
-                    try:
-                        size = int(att.get("attachmentSize") or 0)
-                    except (TypeError, ValueError):
-                        size = 0
-                    api_items.append(({
-                        "folder_id": m["folderId"], "message_id": m["messageId"],
-                        "attachment_id": att.get("attachmentId"),
-                        "content_type": att.get("contentType"),
-                        "size": size,
-                    }, name))
-
-            db_items = [(row, clean_filename(row["filename"])) for row in db_rows]
-            for db_row, api_att in match_attachments(db_items, api_items):
-                if api_att is None:
-                    counts["gone"] += 1
-                    continue
-                process_zoho_attachment(conn, client, db_row, api_att, counts)
+            dual_write(
+                write_thread,
+                source_account=account, gmail_thread_id=detail["gmail_thread_id"],
+                subject=detail["subject"], from_addr=detail["from_addr"], to_addr=detail["to_addr"],
+                message_count=detail["message_count"], participants=detail["participants"],
+                thread_dates=detail["thread_dates"], tags=["email", account],
+                is_quarantined=False, generated_at=now_utc(), messages=detail["messages"],
+                attachments_by_message_index=detail["attachments_by_message_index"],
+                client_id=classify_client(client_index, detail["participants"]),
+                access_tier=row["access_tier"],
+            )
+            counts["written"] += 1
         except Exception as e:
-            logger.error("zoho thread %s failed: %s", thread["gmail_thread_id"], e)
+            logger.error("account=%s thread=%s failed: %s", account, thread_id, e)
             counts["error"] += 1
-        finally:
-            conn.close()
+
+        if i % log_every == 0 or i == len(targets):
+            elapsed = time.time() - started
+            rate = i / elapsed if elapsed else 0
+            eta_min = (len(targets) - i) / rate / 60 if rate else float("inf")
+            logger.info("account=%s progress %d/%d written=%d gone=%d error=%d elapsed=%.0fs eta=%.1fmin",
+                        account, i, len(targets), counts["written"], counts["gone"], counts["error"], elapsed, eta_min)
+
+    logger.info("account=%s backfill done: %s", account, counts)
+    return counts
+
+
+def backfill_zoho(limit=None, log_every=5):
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT t.gmail_thread_id, t.access_tier
+                FROM email_threads t JOIN email_attachments a ON a.thread_id = t.id
+                WHERE t.source_account = 'support_zoho' AND a.source_attachment_id IS NULL
+                ORDER BY t.gmail_thread_id
+            """)
+            targets = cur.fetchall()
+    finally:
+        conn.close()
+    if limit:
+        targets = targets[:limit]
+    target_ids = {r["gmail_thread_id"]: r["access_tier"] for r in targets}
+    logger.info("zoho threads to backfill=%d", len(targets))
+    if not targets:
+        return {"written": 0, "gone": 0, "error": 0}
+
+    client = ZohoClient()
+    client_index = load_client_index()
+    all_messages = client.list_all_messages(0, 20000)
+    groups = build_thread_groups(all_messages)
+    logger.info("zoho: fetched %d historical messages, %d distinct threads total", len(all_messages), len(groups))
+
+    counts = {"written": 0, "gone": 0, "error": 0}
+    started = time.time()
+    for i, (thread_id, access_tier) in enumerate(target_ids.items(), 1):
+        msgs = groups.get(thread_id)
+        if not msgs:
+            logger.warning("zoho thread=%s not found in historical message list, skipping", thread_id)
+            counts["gone"] += 1
+            continue
+        try:
+            msgs = sorted(msgs, key=lambda m: int(m.get("receivedTime", 0)))
+            msg_records = []
+            attachments_by_message_index = {}
+            for idx, m in enumerate(msgs):
+                content = client.fetch_message_content(m["folderId"], m["messageId"])
+                body = decode_zoho_body(content)
+                received = int(m.get("receivedTime", 0))
+                from datetime import datetime, timezone
+                msg_date = datetime.fromtimestamp(received / 1000, tz=timezone.utc) if received else None
+                msg_records.append({
+                    "message_index": idx + 1,
+                    "message_date": msg_date,
+                    "from_addr": m.get("fromAddress"),
+                    "body": body,
+                })
+                if str(m.get("hasAttachment")) == "1":
+                    for att in client.fetch_attachment_info(m["folderId"], m["messageId"]):
+                        size = att.get("attachmentSize")
+                        try:
+                            size_int = int(size)
+                        except (TypeError, ValueError):
+                            size_int = None
+                        attachment_id = att.get("attachmentId", "")
+                        filename = att.get("attachmentName") or f"attachment-{attachment_id}"
+                        extracted_text = None
+                        if (
+                            attachment_id and extractable(filename)
+                            and (size_int is None or size_int < MAX_ATTACHMENT_DOWNLOAD_BYTES)
+                        ):
+                            data = client.download_attachment(m["folderId"], m["messageId"], attachment_id)
+                            if data is not None:
+                                extracted_text = extract_text(filename, data)
+                        attachments_by_message_index.setdefault(idx + 1, []).append({
+                            "filename": filename,
+                            "size_bytes": size_int,
+                            "source_attachment_id": attachment_id or None,
+                            "mimetype": mimetypes.guess_type(filename)[0],
+                            "extracted_text": extracted_text,
+                        })
+
+            subject = msgs[0].get("subject", "(no subject)")
+            participants = sorted({m.get("fromAddress", "").lower() for m in msgs if m.get("fromAddress")})
+            dual_write(
+                write_thread,
+                source_account="support_zoho", gmail_thread_id=thread_id,
+                subject=subject, from_addr=msgs[0].get("fromAddress"), to_addr=msgs[0].get("toAddress"),
+                message_count=len(msgs), participants=participants,
+                thread_dates=[m["message_date"] for m in msg_records if m["message_date"]],
+                tags=["email", "support_zoho"], is_quarantined=False, generated_at=now_utc(),
+                messages=msg_records, attachments_by_message_index=attachments_by_message_index,
+                client_id=classify_client(client_index, participants),
+                access_tier=access_tier,
+            )
+            counts["written"] += 1
+        except Exception as e:
+            logger.error("zoho thread=%s failed: %s", thread_id, e)
+            counts["error"] += 1
+
+        if i % log_every == 0 or i == len(target_ids):
+            logger.info("zoho progress %d/%d written=%d gone=%d error=%d", i, len(target_ids), counts["written"], counts["gone"], counts["error"])
 
     logger.info("zoho backfill done: %s", counts)
     return counts
@@ -386,18 +323,26 @@ def process_zoho():
 
 def main():
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--account", choices=list(ACCOUNTS.keys()))
-    group.add_argument("--zoho", action="store_true")
-    parser.add_argument("--shard-index", type=int, default=0)
-    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--account", choices=list(ACCOUNTS.keys()))
+    parser.add_argument("--zoho", action="store_true")
+    parser.add_argument("--local-vault", action="store_true")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--shard-index", type=int, default=None)
+    parser.add_argument("--shard-count", type=int, default=None)
     args = parser.parse_args()
 
-    if args.zoho:
-        result = process_zoho()
+    if args.local_vault:
+        print(backfill_from_local_vault())
+    elif args.zoho:
+        print(backfill_zoho(limit=args.limit))
+    elif args.account:
+        print(backfill_gmail(args.account, limit=args.limit, shard_index=args.shard_index, shard_count=args.shard_count))
     else:
-        result = process_account(args.account, args.shard_index, args.shard_count)
-    print(result)
+        results = {}
+        for account in ACCOUNTS:
+            results[account] = backfill_gmail(account, limit=args.limit)
+        results["support_zoho"] = backfill_zoho(limit=args.limit)
+        print(results)
 
 
 if __name__ == "__main__":

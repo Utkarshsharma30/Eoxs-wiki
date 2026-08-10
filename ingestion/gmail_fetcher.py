@@ -24,13 +24,16 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from ingestion.attachment_extract import MAX_EXTRACT_BYTES, extract_text, is_extractable
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.write_email import write_thread, existing_message_count
 from ingestion.routing import load_client_index, classify_client
 from ingestion.retry import call_with_retry
+from ingestion.attachment_extract import extractable, extract_text
+
+MAX_ATTACHMENT_DOWNLOAD_BYTES = 50 * 1024 * 1024  # matches the old vault pipeline's cutoff -- see extract_attachments
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.gmail")
@@ -150,23 +153,40 @@ def find_gmail_attachment_parts(payload):
     return found
 
 
-def download_attachment(service, message_id, attachment_id):
-    request = service.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id)
-    resp = call_with_retry(
-        lambda: request.execute(num_retries=GMAIL_NUM_RETRIES),
-        is_retryable=_is_retryable, retry_after_getter=_retry_after,
-    )
-    return base64.urlsafe_b64decode(resp["data"])
+def _download_gmail_attachment(service, message_id, attachment_id):
+    """Returns raw bytes, or None on failure -- never raises (mirrors the
+    old vault pipeline's download_gmail_attachments error handling)."""
+    try:
+        resp = call_with_retry(
+            lambda: service.users().messages().attachments().get(
+                userId="me", messageId=message_id, id=attachment_id
+            ).execute(num_retries=GMAIL_NUM_RETRIES),
+            is_retryable=_is_retryable, retry_after_getter=_retry_after,
+        )
+    except Exception as e:
+        logger.warning("attachment download failed (message=%s, attachment=%s): %s", message_id, attachment_id, e)
+        return None
+    data = resp.get("data", "")
+    if not data:
+        return None
+    return base64.urlsafe_b64decode(data + "==")
 
 
-def extract_attachments(service, message_id, payload):
-    """mimetype/source_attachment_id come free from the part metadata
-    already in this response -- no extra API call. Bytes are only
-    downloaded (one extra API call each) for extractable types
-    (pdf/docx/xlsx/txt/csv) under attachment_extract.MAX_EXTRACT_BYTES;
-    everything else still gets full metadata, just no extracted_text.
-    A download/extract failure degrades to no text rather than failing
-    the whole thread -- see ingestion/attachment_extract.py."""
+def extract_attachments(payload, service=None, message_id=None):
+    """Always records metadata (filename/size/note) for every attachment
+    part found -- nothing is silently dropped, inline images (signature
+    logos, tracking pixels) are still recorded, just noted as such.
+
+    2026-08: also captures the native Gmail attachmentId (previously
+    fetched from the API response and then discarded -- without it, an
+    already-ingested attachment could never be re-fetched later, only
+    recovered by a full re-scan) and, for extractable document formats
+    (pdf/docx/xlsx/csv -- see ingestion/attachment_extract.py) under
+    MAX_ATTACHMENT_DOWNLOAD_BYTES, downloads the real content and stores
+    extracted text. Images and other non-document formats are still
+    fully recorded (filename/size), just never downloaded -- no OCR, no
+    reason to spend an API call and disk-adjacent DB storage on bytes
+    nothing can read yet."""
     attachments = []
     for part in find_gmail_attachment_parts(payload):
         size = part.get("body", {}).get("size")
@@ -174,26 +194,26 @@ def extract_attachments(service, message_id, payload):
             size_int = int(size)
         except (TypeError, ValueError):
             size_int = None
+        attachment_id = part.get("body", {}).get("attachmentId", "")
+        filename = part.get("filename") or f"attachment-{attachment_id}"
         note = "inline image" if _content_disposition_is_inline(part) else None
-        filename = part.get("filename") or f"attachment-{part.get('body', {}).get('attachmentId', '')}"
-        attachment_id = part.get("body", {}).get("attachmentId")
-        mimetype = part.get("mimeType") or None
-
-        extracted = None
-        if attachment_id and is_extractable(filename) and size_int is not None and size_int <= MAX_EXTRACT_BYTES:
-            try:
-                data = download_attachment(service, message_id, attachment_id)
-                extracted = extract_text(data, filename)
-            except Exception as e:
-                logger.warning("attachment extract failed message=%s filename=%r: %s", message_id, filename, e)
-
+        mimetype = part.get("mimeType")
+        extracted_text = None
+        if (
+            service is not None and message_id and attachment_id
+            and extractable(filename)
+            and (size_int is None or size_int < MAX_ATTACHMENT_DOWNLOAD_BYTES)
+        ):
+            data = _download_gmail_attachment(service, message_id, attachment_id)
+            if data is not None:
+                extracted_text = extract_text(filename, data)
         attachments.append({
             "filename": filename,
             "size_bytes": size_int,
             "note": note,
-            "source_attachment_id": attachment_id,
+            "source_attachment_id": attachment_id or None,
             "mimetype": mimetype,
-            "extracted_text": extracted,
+            "extracted_text": extracted_text,
         })
     return attachments
 
@@ -236,7 +256,7 @@ def fetch_thread_detail(service, thread_id):
         })
         message_ids.append(m["id"])
 
-        atts = extract_attachments(service, m["id"], m["payload"])
+        atts = extract_attachments(m["payload"], service=service, message_id=m["id"])
         if atts:
             attachments_by_message_index[i + 1] = atts
 
@@ -300,6 +320,8 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 counts["written_items"].append(detail["subject"])
                 continue
 
+            first_body = detail["messages"][0]["body"] if detail["messages"] else ""
+            tier_context = f"Email subject: {detail['subject']}\nBody (truncated):\n{first_body}"
             dual_write(
                 write_thread,
                 source_account=account, gmail_thread_id=detail["gmail_thread_id"],
@@ -309,6 +331,7 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 is_quarantined=False, generated_at=now_utc(), messages=detail["messages"],
                 attachments_by_message_index=detail["attachments_by_message_index"],
                 client_id=classify_client(client_index, detail["participants"]),
+                access_tier=classify_tier(tier_context),
             )
             mark_messages_seen(detail["message_ids"], account)
             counts["written"] += 1

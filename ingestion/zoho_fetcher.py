@@ -23,14 +23,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
-from ingestion.attachment_extract import MAX_EXTRACT_BYTES, extract_text, is_extractable
 from ingestion.db import dual_write
 from ingestion.state import sync_since, set_last_synced_at, now_utc, is_message_seen, mark_messages_seen
 from ingestion.spam_filter import is_eoxs_relevant
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.write_email import write_thread, existing_message_count
 from ingestion.routing import load_client_index, classify_client
 from ingestion.db import get_live_conn
 from ingestion.retry import call_with_retry
+from ingestion.attachment_extract import extractable, extract_text
+
+MAX_ATTACHMENT_DOWNLOAD_BYTES = 50 * 1024 * 1024  # matches the old vault pipeline's cutoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.zoho")
@@ -158,12 +161,19 @@ class ZohoClient:
         attachments = data.get("attachments", []) if isinstance(data, dict) else []
         return attachments if isinstance(attachments, list) else []
 
-    def fetch_attachment_content(self, folder_id, message_id, attachment_id):
-        """Downloads one attachment's raw bytes."""
-        resp = self._request(
-            "GET",
-            f"{MAIL_API_BASE}/accounts/{self.account_id}/folders/{folder_id}/messages/{message_id}/attachments/{attachment_id}",
-        )
+    def download_attachment(self, folder_id, message_id, attachment_id):
+        """Downloads one attachment's raw content. Unlike the JSON-wrapped
+        -base64 shape Odoo's ir.attachment.read returns, Zoho's attachment
+        -content endpoint streams the raw bytes directly in the response
+        body -- no envelope to unwrap. Returns None on failure, never
+        raises (matches the old vault pipeline's ZohoClient method this
+        was ported from)."""
+        url = f"{MAIL_API_BASE}/accounts/{self.account_id}/folders/{folder_id}/messages/{message_id}/attachments/{attachment_id}"
+        try:
+            resp = self._request("GET", url, headers={"Accept": "application/octet-stream"})
+        except Exception as e:
+            logger.warning("zoho attachment download failed (message=%s, attachment=%s): %s", message_id, attachment_id, e)
+            return None
         return resp.content
 
 
@@ -243,28 +253,29 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                             size_int = int(size)
                         except (TypeError, ValueError):
                             size_int = None
-                        filename = att.get("attachmentName") or f"attachment-{att.get('attachmentId', '')}"
-                        attachment_id = att.get("attachmentId")
-                        # Zoho's attachmentinfo response has no reliable
-                        # content-type field (confirmed against live data --
-                        # earlier code guessed a nonexistent "attachmentType"
-                        # key) -- derive from the filename instead.
-                        mimetype = mimetypes.guess_type(filename)[0]
-
-                        extracted = None
-                        if attachment_id and is_extractable(filename) and size_int is not None and size_int <= MAX_EXTRACT_BYTES:
-                            try:
-                                data = client.fetch_attachment_content(m["folderId"], m["messageId"], attachment_id)
-                                extracted = extract_text(data, filename)
-                            except Exception as e:
-                                logger.warning("attachment extract failed message=%s filename=%r: %s", m["messageId"], filename, e)
-
+                        attachment_id = att.get("attachmentId", "")
+                        filename = att.get("attachmentName") or f"attachment-{attachment_id}"
+                        # 2026-08: download + extract text for supported
+                        # document formats (see ingestion/attachment_extract.py)
+                        # -- previously metadata-only (v1 scope, schema/015's
+                        # comment), and attachmentId was fetched but never
+                        # persisted, meaning an already-ingested attachment
+                        # could never be recovered later without a full
+                        # re-scan. Both gaps closed here.
+                        extracted_text = None
+                        if (
+                            attachment_id and extractable(filename)
+                            and (size_int is None or size_int < MAX_ATTACHMENT_DOWNLOAD_BYTES)
+                        ):
+                            data = client.download_attachment(m["folderId"], m["messageId"], attachment_id)
+                            if data is not None:
+                                extracted_text = extract_text(filename, data)
                         attachments_by_message_index.setdefault(i + 1, []).append({
                             "filename": filename,
                             "size_bytes": size_int,
-                            "source_attachment_id": attachment_id,
-                            "mimetype": mimetype,
-                            "extracted_text": extracted,
+                            "source_attachment_id": attachment_id or None,
+                            "mimetype": mimetypes.guess_type(filename)[0],
+                            "extracted_text": extracted_text,
                         })
 
             subject = msgs[0].get("subject", "(no subject)")
@@ -272,8 +283,9 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 m.get("fromAddress", "").lower() for m in msgs if m.get("fromAddress")
             })
 
+            first_body = msg_records[0]["body"] if msg_records else ""
+
             if classify:
-                first_body = msg_records[0]["body"] if msg_records else ""
                 if not is_eoxs_relevant(subject, first_body):
                     counts["skipped_spam"] += 1
                     mark_messages_seen(message_ids, SOURCE)
@@ -286,6 +298,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 counts["written_items"].append(subject)
                 continue
 
+            tier_context = f"Email subject: {subject}\nBody (truncated):\n{first_body}"
             dual_write(
                 write_thread,
                 source_account=SOURCE, gmail_thread_id=thread_id,
@@ -297,6 +310,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 messages=msg_records,
                 attachments_by_message_index=attachments_by_message_index,
                 client_id=classify_client(client_index, participants),
+                access_tier=classify_tier(tier_context),
             )
             mark_messages_seen(message_ids, SOURCE)
             counts["written"] += 1

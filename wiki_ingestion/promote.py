@@ -1,11 +1,15 @@
 """Phase 5's promotion step: moves a 'reviewed' staging draft into
-public.wiki_pages for real. Deliberately NOT called automatically by
-run_review.py or anything else -- promotion is a human-gated decision for
-now (approve after seeing the review sweep's results), with the
-functions below ready to be wired into an automatic path later once
-that trust is established. There is no code path from a bare review
-sweep to a live write; someone has to call promote_reviewed_pages()
-(or promote_page() for a single id) on purpose.
+public.wiki_pages for real.
+
+2026-08 change: promote_reviewed_pages() is now called automatically by
+run_review.py at the end of every scheduled review sweep -- a page the
+review agent marks 'reviewed' goes live with no further human gate.
+This was a deliberate decision (not every review outcome gets this
+trust: 'rejected' pages are never touched by this module at all, and
+still require a human to decide what happens to them next). The
+functions below are unchanged from when promotion was a manual-only
+step; promote_page() still works standalone for a single id if ever
+needed by hand.
 
 live_page_id NULL on the staging row means CREATE (INSERT into
 wiki_pages); non-NULL means UPDATE that existing live row. Either way,
@@ -18,7 +22,7 @@ import json
 from datetime import date
 
 from ingestion.db import get_live_conn
-from wiki_ingestion.linear_report import report_promotion
+from wiki_ingestion.linear_report import report_promotion, report_pending_drafts_board
 
 
 def _fetch_reviewed(conn, staging_page_id):
@@ -105,6 +109,48 @@ def promote_page(staging_page_id):
                 (live_id, staging_page_id),
             )
 
+            # Access-tier: MAX (most restrictive) of every citation just copied
+            # above, across the 3-level scheme (tier1 = Raj-personal >
+            # tier2_confidential = company-confidential > tier2 = general).
+            # Reliable here (unlike the old vault-imported pages) because the
+            # agent resolves source_id against a real row before ever calling
+            # add_staging_citation -- see agent_mcp_server.py, which only
+            # allows the four real raw source_types, no 'unresolved'/
+            # 'wiki_page' escape hatch. Implementation-task citations store
+            # source_id as odoo_task_id, which collides across clients (no
+            # client_id on the citation row) -- the join below doesn't try to
+            # disambiguate, it just fails closed: whichever cited candidate
+            # (across every client sharing that id number) is most
+            # restrictive wins.
+            cur.execute(
+                """
+                SELECT t.access_tier::text AS tier FROM wiki_citations wc JOIN email_threads t
+                  ON wc.source_type = 'email_thread' AND t.id = wc.source_id
+                WHERE wc.wiki_page_id = %s
+                UNION
+                SELECT t.access_tier::text FROM wiki_citations wc JOIN call_transcripts t
+                  ON wc.source_type = 'call_transcript' AND t.id = wc.source_id
+                WHERE wc.wiki_page_id = %s
+                UNION
+                SELECT t.access_tier::text FROM wiki_citations wc JOIN tickets t
+                  ON wc.source_type = 'ticket' AND t.id = wc.source_id
+                WHERE wc.wiki_page_id = %s
+                UNION
+                SELECT t.access_tier::text FROM wiki_citations wc JOIN implementation_tasks t
+                  ON wc.source_type = 'implementation_task' AND t.odoo_task_id = wc.source_id
+                WHERE wc.wiki_page_id = %s
+                """,
+                (live_id, live_id, live_id, live_id),
+            )
+            cited_tiers = {row["tier"] for row in cur.fetchall()}
+            if "tier1" in cited_tiers:
+                access_tier = "tier1"
+            elif "tier2_confidential" in cited_tiers:
+                access_tier = "tier2_confidential"
+            else:
+                access_tier = "tier2"
+            cur.execute("UPDATE wiki_pages SET access_tier = %s WHERE id = %s", (access_tier, live_id))
+
             cur.execute(
                 "UPDATE wiki_staging.wiki_pages SET status = 'promoted', live_page_id = %s, updated_at = now() WHERE id = %s",
                 (live_id, staging_page_id),
@@ -171,6 +217,7 @@ def promote_reviewed_pages():
         "newly_resolved_links": newly_resolved_links,
     }
     report_promotion(result)
+    report_pending_drafts_board()
     return result
 
 

@@ -52,8 +52,17 @@ _team_id_cache = {}
 _state_id_cache = {}
 
 ISSUE_CREATE_MUTATION = """
-mutation($teamId: String!, $title: String!, $description: String!, $stateId: String) {
-    issueCreate(input: {teamId: $teamId, title: $title, description: $description, stateId: $stateId}) {
+mutation($teamId: String!, $title: String!, $description: String!, $stateId: String, $parentId: String) {
+    issueCreate(input: {teamId: $teamId, title: $title, description: $description, stateId: $stateId, parentId: $parentId}) {
+        success
+        issue { id identifier url }
+    }
+}
+"""
+
+ISSUE_UPDATE_MUTATION = """
+mutation($id: String!, $title: String!, $description: String!, $stateId: String) {
+    issueUpdate(id: $id, input: {title: $title, description: $description, stateId: $stateId}) {
         success
         issue { id identifier url }
     }
@@ -100,12 +109,12 @@ def _get_state_id(name):
     return _state_id_cache.get(name)
 
 
-def _create_issue(title, description, state_name=None):
+def _create_issue(title, description, state_name=None, parent_id=None):
     team_id = _get_team_id()
     state_id = _get_state_id(state_name) if state_name else None
     resp = httpx.post(
         LINEAR_API_URL,
-        json={"query": ISSUE_CREATE_MUTATION, "variables": {"teamId": team_id, "title": title, "description": description, "stateId": state_id}},
+        json={"query": ISSUE_CREATE_MUTATION, "variables": {"teamId": team_id, "title": title, "description": description, "stateId": state_id, "parentId": parent_id}},
         headers={"Authorization": LINEAR_EDB_API_KEY},
         timeout=15,
     )
@@ -114,6 +123,25 @@ def _create_issue(title, description, state_name=None):
     if data.get("errors"):
         raise RuntimeError(f"Linear issueCreate errors: {data['errors']}")
     return data["data"]["issueCreate"]
+
+
+def _update_issue(issue_id, title, description, state_name=None):
+    """Updates an existing issue in place -- for persistent 'board' issues
+    that should stay as ONE issue reflecting current state, not spawn a
+    new issue every time something changes (e.g. the pending-drafts
+    board, refreshed every wiki-ingestion cycle)."""
+    state_id = _get_state_id(state_name) if state_name else None
+    resp = httpx.post(
+        LINEAR_API_URL,
+        json={"query": ISSUE_UPDATE_MUTATION, "variables": {"id": issue_id, "title": title, "description": description, "stateId": state_id}},
+        headers={"Authorization": LINEAR_EDB_API_KEY},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("errors"):
+        raise RuntimeError(f"Linear issueUpdate errors: {data['errors']}")
+    return data["data"]["issueUpdate"]
 
 
 def _items_for(detail):
@@ -214,9 +242,13 @@ def _title(result, run_at):
 
 
 def report_full_sweep(result):
-    """Never raises -- a Linear reporting failure should never fail or
-    mask an otherwise-successful ingestion run (same discipline as
-    ingest_log.log_run)."""
+    """Legacy single-issue report -- kept for any external caller still
+    using it, but run_full_sweep() itself now uses the granular
+    start_sweep_parent/start_source_task flow below (2026-08 redesign,
+    matching wiki_ingestion's per-sub-agent-task model: one parent issue
+    per sweep, one child task per source, created before that source
+    runs and updated with its real outcome after -- not one aggregate
+    issue after the fact)."""
     if not LINEAR_EDB_API_KEY:
         logger.warning("LINEAR_EDB_API_KEY not set -- skipping Linear report")
         return
@@ -232,3 +264,97 @@ def report_full_sweep(result):
             logger.info("Linear report created: %s", created["issue"]["identifier"])
     except Exception as e:
         logger.warning("Linear report failed (ingestion result unaffected): %s", e)
+
+
+def start_sweep_parent():
+    """Creates the parent issue for a sweep at the moment it starts, before
+    any source has run -- so a stuck/slow sweep is visible while in
+    flight. Returns the Linear issue id, or None (never raises)."""
+    if not LINEAR_EDB_API_KEY:
+        return None
+    try:
+        run_at = now_utc()
+        title = f"Raw ingestion sweep — {run_at.strftime('%Y-%m-%d %H:%M UTC')} — running"
+        body = f"Started {run_at.strftime('%Y-%m-%d %H:%M:%S UTC')}. Each source below runs as its own sub-task."
+        created = _create_issue(title, body, state_name="Todo")
+        if not created.get("success"):
+            logger.warning("Linear issueCreate returned success=false: %s", created)
+            return None
+        return created["issue"]["id"]
+    except Exception as e:
+        logger.warning("Linear sweep-parent create failed: %s", e)
+        return None
+
+
+def finish_sweep_parent(parent_issue_id, result, run_at):
+    if not parent_issue_id:
+        return
+    try:
+        rows = _rows(result)
+        total_written = sum(r[4] for r in rows)
+        has_errors = any(r[5] for r in rows)
+        title = f"Raw ingestion sweep — {run_at.strftime('%Y-%m-%d %H:%M UTC')} — {total_written} new row(s)" + (" (errors)" if has_errors else "")
+        body = (
+            f"**Total new rows: {total_written}**" + (f"  ⚠️ some source(s) had errors" if has_errors else "") +
+            "\n\nOpen the sub-issues below for each source's exact rows/tables."
+        )
+        _update_issue(parent_issue_id, title, body, state_name="Todo" if has_errors else "Done")
+    except Exception as e:
+        logger.warning("Linear sweep-parent finish failed: %s", e)
+
+
+def start_source_task(parent_issue_id, name):
+    if not parent_issue_id:
+        return None
+    try:
+        title = f"Sweep · {name} — running"
+        table = SOURCE_TABLES.get(name, "?")
+        body = f"**Phase**: raw ingestion sweep\n**Source**: {name}\n**Target table(s)**: {table}\n"
+        created = _create_issue(title, body, state_name="Todo", parent_id=parent_issue_id)
+        if not created.get("success"):
+            logger.warning("Linear issueCreate returned success=false: %s", created)
+            return None
+        return created["issue"]["id"]
+    except Exception as e:
+        logger.warning("Linear source-task create failed for %s: %s", name, e)
+        return None
+
+
+def finish_source_task(issue_id, name, detail):
+    """detail: exactly what that source's fetch function returned (a
+    {"written":N,"error":N,"written_items":[...]} dict, a nested
+    per-account/per-client dict, a bare int, or None on exception --
+    same shapes _rows() already knows how to flatten)."""
+    if not issue_id:
+        return
+    try:
+        sub_rows = _rows({name: detail})
+        written = sum(r[4] for r in sub_rows)
+        errors = sum(1 for r in sub_rows if r[5])
+
+        lines = [f"**Source**: {name}", ""]
+        if len(sub_rows) > 1:
+            lines += ["| Account/client | Table(s) | New rows | Errors |", "|---|---|---|---|"]
+            for _, _, label, table, w, e, _ in sub_rows:
+                lines.append(f"| {label} | {table} | {w} | {e or 0} |")
+            lines.append("")
+
+        for _, _, label, table, w, e, d in sub_rows:
+            if not w:
+                continue
+            items, truncated = _items_for(d)
+            if items:
+                lines.append(f"**{label}** ({w} written):")
+                lines += [f"- {i}" for i in items]
+                if truncated:
+                    lines.append(f"- _...and {w - ITEMS_PER_SOURCE_LIMIT} more_")
+                lines.append("")
+
+        if name == "odoo" and written:
+            lines.append("_odoo does a full client-task refresh every run (not incremental), so individual \"new\" items aren't listed -- use list_implementation_tasks/get_implementation_task to browse._")
+
+        title = f"Sweep · {name} — {written} new row(s)" + (" (errors)" if errors else "")
+        body = "\n".join(lines) if len(lines) > 2 else f"**Source**: {name}\n\n{written} new row(s), {errors} error(s)."
+        _update_issue(issue_id, title, body, state_name="Todo" if errors else "Done")
+    except Exception as e:
+        logger.warning("Linear source-task finish failed for %s: %s", name, e)

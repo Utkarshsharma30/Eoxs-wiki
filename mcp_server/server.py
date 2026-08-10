@@ -4,9 +4,32 @@ existing OV2 vault MCP server, for direct reliability/quality comparison.
 Read-only: every tool issues SELECT queries against eoxs_app, which itself
 has no reason to hold write privileges beyond what the loaders need locally.
 
-Run with: python mcp_server/server.py
+Access-tier enforcement: every raw-source tool takes a `clearance` kwarg
+(a list of allowed access_tier values) that's bound per-connection via
+build_server(), never taken from the caller's tool-call arguments -- it's
+not in any tool's inputSchema, so nothing the MCP client sends can widen
+its own clearance. `server`/`TOOLS`/`main()` below (stdio transport, used
+for local/Claude-Code-CLI access) default to FULL_CLEARANCE, matching the
+fact that whoever can run this file already has direct Postgres
+credentials in .env -- no narrower boundary to enforce there. The HTTP/SSE
+transport (http_server.py) is where the real boundary lives: it builds a
+SEPARATE Server instance per identity, each closed over its own clearance,
+mounted at its own secret URL path.
+
+Three levels, additive by role (see schema/020_tier2_confidential.sql for
+the full definition):
+  tier1              Raj's own personal data. FULL_CLEARANCE only.
+  tier2_confidential Company-confidential (salary/payroll, investor
+                      relations, financial statements, vendor contracts,
+                      legal/compliance). FULL_CLEARANCE + HR_CLEARANCE.
+  tier2              General, everyone. All three clearances.
+
+Wiki tools (get_wiki_page/search_wiki) ARE tier-filtered now that
+wiki-page access-tier computation is built (wiki_ingestion/promote.py for
+new pages, wiki_ingestion/tier_classifier.py for the historical backlog).
 """
 import asyncio
+import functools
 import json
 import sys
 from pathlib import Path
@@ -18,37 +41,46 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from mcp_server.db import query as db_query, query_one as db_query_one
-
-server = Server("eoxs-wiki-db")
+from mcp_server import redaction
 
 BODY_PREVIEW_CHARS = 1500  # full body is often 10-50K chars; a preview keeps get_* calls usable
+
+FULL_CLEARANCE = ["tier1", "tier2_confidential", "tier2"]
+HR_CLEARANCE = ["tier2_confidential", "tier2"]
+GENERAL_CLEARANCE = ["tier2"]
 
 # ---------------------------------------------------------------------------
 # Tool implementations. Every function's parameter names match the JSON
 # schema keys below exactly -- call_tool() dispatches via func(**arguments),
-# so a mismatch here silently breaks every real call from Claude.
+# so a mismatch here silently breaks every real call from Claude. Tools that
+# read tiered raw tables take a trailing `clearance` kwarg, bound per-server
+# instance by build_server() -- never part of any tool's inputSchema, so it
+# can never arrive from the client's own arguments.
 # ---------------------------------------------------------------------------
 
-def get_index():
+def get_index(clearance=FULL_CLEARANCE):
     counts = db_query_one("""
         SELECT
-            (SELECT count(*) FROM wiki_pages) AS wiki_pages,
-            (SELECT count(*) FROM email_threads) AS email_threads,
-            (SELECT count(*) FROM tickets) AS tickets,
-            (SELECT count(*) FROM sales_orders) AS sales_orders,
-            (SELECT count(*) FROM call_transcripts WHERE source='fireflies') AS fireflies_calls,
-            (SELECT count(*) FROM call_transcripts WHERE source='fathom') AS fathom_calls,
+            (SELECT count(*) FROM wiki_pages WHERE access_tier::text = ANY(%s)) AS wiki_pages,
+            (SELECT count(*) FROM email_threads WHERE access_tier::text = ANY(%s)) AS email_threads,
+            (SELECT count(*) FROM tickets WHERE access_tier::text = ANY(%s)) AS tickets,
+            (SELECT count(*) FROM sales_orders WHERE access_tier::text = ANY(%s)) AS sales_orders,
+            (SELECT count(*) FROM call_transcripts WHERE source='fireflies' AND access_tier::text = ANY(%s)) AS fireflies_calls,
+            (SELECT count(*) FROM call_transcripts WHERE source='fathom' AND access_tier::text = ANY(%s)) AS fathom_calls,
             (SELECT count(*) FROM clients) AS clients,
-            (SELECT count(*) FROM implementation_tasks) AS implementation_tasks
-    """)
-    by_type = db_query("SELECT page_type, count(*) AS n FROM wiki_pages GROUP BY page_type ORDER BY page_type")
+            (SELECT count(*) FROM implementation_tasks WHERE access_tier::text = ANY(%s)) AS implementation_tasks
+    """, (clearance, clearance, clearance, clearance, clearance, clearance, clearance))
+    by_type = db_query(
+        "SELECT page_type, count(*) AS n FROM wiki_pages WHERE access_tier::text = ANY(%s) GROUP BY page_type ORDER BY page_type",
+        (clearance,),
+    )
     return {"totals": counts, "wiki_pages_by_type": by_type}
 
 
-def get_wiki_page(title):
+def get_wiki_page(title, clearance=FULL_CLEARANCE):
     page = db_query_one(
-        "SELECT * FROM wiki_pages WHERE title ILIKE %s ORDER BY updated_date DESC NULLS LAST LIMIT 1",
-        (f"%{title}%",),
+        "SELECT * FROM wiki_pages WHERE title ILIKE %s AND access_tier::text = ANY(%s) ORDER BY updated_date DESC NULLS LAST LIMIT 1",
+        (f"%{title}%", clearance),
     )
     if not page:
         return {"error": f"no wiki page matching '{title}'"}
@@ -71,20 +103,20 @@ def get_wiki_page(title):
     return page
 
 
-def search_wiki(query):
+def search_wiki(query, clearance=FULL_CLEARANCE):
     return db_query(
         """SELECT title, page_type, ts_headline('english', body, plainto_tsquery('english', %s)) AS snippet
            FROM wiki_pages
-           WHERE body_tsv @@ plainto_tsquery('english', %s)
+           WHERE body_tsv @@ plainto_tsquery('english', %s) AND access_tier::text = ANY(%s)
            ORDER BY ts_rank(body_tsv, plainto_tsquery('english', %s)) DESC
            LIMIT 20""",
-        (query, query, query),
+        (query, query, clearance, query),
     )
 
 
-def list_emails(account="all", month=""):
-    sql = "SELECT id, source_account, gmail_thread_id, subject, message_count, source_file_path FROM email_threads WHERE 1=1"
-    params = []
+def list_emails(account="all", month="", clearance=FULL_CLEARANCE):
+    sql = "SELECT id, source_account, gmail_thread_id, subject, message_count, source_file_path FROM email_threads WHERE access_tier::text = ANY(%s)"
+    params = [clearance]
     if account != "all":
         sql += " AND source_account = %s"
         params.append(account)
@@ -95,14 +127,14 @@ def list_emails(account="all", month=""):
     return db_query(sql, params)
 
 
-def search_emails(query, account="all"):
+def search_emails(query, account="all", clearance=FULL_CLEARANCE):
     sql = """
         SELECT DISTINCT t.id, t.source_account, t.subject, t.source_file_path,
                ts_headline('english', m.body, plainto_tsquery('english', %s)) AS snippet
         FROM email_threads t JOIN email_messages m ON m.thread_id = t.id
-        WHERE m.body_tsv @@ plainto_tsquery('english', %s)
+        WHERE m.body_tsv @@ plainto_tsquery('english', %s) AND t.access_tier::text = ANY(%s)
     """
-    params = [query, query]
+    params = [query, query, clearance]
     if account != "all":
         sql += " AND t.source_account = %s"
         params.append(account)
@@ -110,26 +142,64 @@ def search_emails(query, account="all"):
     return db_query(sql, params)
 
 
-def get_email(identifier):
+def get_email(identifier, clearance=FULL_CLEARANCE):
     """identifier: the row's numeric id (from a search/list result -- REQUIRED for
     API-ingested threads, which always have a NULL source_file_path) or a legacy
-    source_file_path string (only ever set for the historical file-based load)."""
+    source_file_path string (only ever set for the historical file-based load).
+    A thread outside the caller's clearance returns the same "not found" as a
+    thread that doesn't exist -- no separate "exists but restricted" message,
+    so a general-clearance caller can't use this to confirm a tier1 thread's
+    existence."""
     if str(identifier).isdigit():
-        thread = db_query_one("SELECT * FROM email_threads WHERE id = %s", (int(identifier),))
+        thread = db_query_one(
+            "SELECT * FROM email_threads WHERE id = %s AND access_tier::text = ANY(%s)", (int(identifier), clearance)
+        )
     else:
-        thread = db_query_one("SELECT * FROM email_threads WHERE source_file_path = %s", (identifier,))
+        thread = db_query_one(
+            "SELECT * FROM email_threads WHERE source_file_path = %s AND access_tier::text = ANY(%s)",
+            (identifier, clearance),
+        )
     if not thread:
         return {"error": f"no email thread matching '{identifier}'"}
     thread["messages"] = db_query(
         "SELECT message_index, message_date, from_addr, body FROM email_messages WHERE thread_id = %s ORDER BY message_index",
         (thread["id"],),
     )
+    thread["attachments"] = db_query(
+        """SELECT id, message_id, filename, mimetype, size_bytes,
+                  (extracted_text IS NOT NULL) AS text_extracted
+           FROM email_attachments WHERE thread_id = %s ORDER BY message_id""",
+        (thread["id"],),
+    )
     return thread
 
 
-def list_calls(month="", source=""):
-    sql = "SELECT id, source, meeting_title, call_date, participants, source_file_path FROM call_transcripts WHERE 1=1"
-    params = []
+def get_attachment_text(attachment_id, clearance=FULL_CLEARANCE):
+    """Returns the extracted text for one email attachment, by the 'id' from
+    get_email's attachments list. Attachments have no access_tier column of
+    their own -- enforced via a join to the parent thread's access_tier,
+    same pattern as ticket_events/invoice_lines (only ever reachable through
+    their parent's get_ticket/get_invoice, which check the parent's tier).
+    extracted_text is NULL for formats extraction doesn't support (only pdf/
+    docx/xlsx/csv are covered) -- callers should check get_email's
+    text_extracted flag first rather than assume every attachment has text."""
+    row = db_query_one(
+        """SELECT a.filename, a.mimetype, a.extracted_text
+           FROM email_attachments a JOIN email_threads t ON t.id = a.thread_id
+           WHERE a.id = %s AND t.access_tier::text = ANY(%s)""",
+        (attachment_id, clearance),
+    )
+    if not row:
+        return {"error": f"no attachment matching id={attachment_id}"}
+    if row["extracted_text"] is None:
+        return {"error": f"no extracted text available for attachment '{row['filename']}' "
+                          "(unsupported format, or ingested before extraction was added)"}
+    return row
+
+
+def list_calls(month="", source="", clearance=FULL_CLEARANCE):
+    sql = "SELECT id, source, meeting_title, call_date, participants, source_file_path FROM call_transcripts WHERE access_tier::text = ANY(%s)"
+    params = [clearance]
     if source:
         sql += " AND source = %s"
         params.append(source)
@@ -140,14 +210,14 @@ def list_calls(month="", source=""):
     return db_query(sql, params)
 
 
-def search_calls(query, source=""):
+def search_calls(query, source="", clearance=FULL_CLEARANCE):
     sql = """
         SELECT id, source, meeting_title, call_date, source_file_path,
                ts_headline('english', transcript_body, plainto_tsquery('english', %s)) AS snippet
         FROM call_transcripts
-        WHERE transcript_tsv @@ plainto_tsquery('english', %s)
+        WHERE transcript_tsv @@ plainto_tsquery('english', %s) AND access_tier::text = ANY(%s)
     """
-    params = [query, query]
+    params = [query, query, clearance]
     if source:
         sql += " AND source = %s"
         params.append(source)
@@ -155,15 +225,21 @@ def search_calls(query, source=""):
     return db_query(sql, params)
 
 
-def get_call(identifier):
+def get_call(identifier, clearance=FULL_CLEARANCE):
     """identifier: the row's numeric id (from a search/list result -- REQUIRED for
     API-ingested calls, i.e. every Fireflies/Fathom call, which always have a NULL
     source_file_path) or a legacy source_file_path string (only ever set for the
-    historical file-based load)."""
+    historical file-based load). Same not-found-vs-restricted non-disclosure as
+    get_email."""
     if str(identifier).isdigit():
-        call = db_query_one("SELECT * FROM call_transcripts WHERE id = %s", (int(identifier),))
+        call = db_query_one(
+            "SELECT * FROM call_transcripts WHERE id = %s AND access_tier::text = ANY(%s)", (int(identifier), clearance)
+        )
     else:
-        call = db_query_one("SELECT * FROM call_transcripts WHERE source_file_path = %s", (identifier,))
+        call = db_query_one(
+            "SELECT * FROM call_transcripts WHERE source_file_path = %s AND access_tier::text = ANY(%s)",
+            (identifier, clearance),
+        )
     if not call:
         return {"error": f"no call matching '{identifier}'"}
     call["segments"] = db_query(
@@ -173,10 +249,15 @@ def get_call(identifier):
     return call
 
 
-def get_ticket(identifier):
-    ticket = db_query_one("SELECT * FROM tickets WHERE ticket_number = %s", (identifier.upper(),))
+def get_ticket(identifier, clearance=FULL_CLEARANCE):
+    ticket = db_query_one(
+        "SELECT * FROM tickets WHERE ticket_number = %s AND access_tier::text = ANY(%s)", (identifier.upper(), clearance)
+    )
     if not ticket:
-        ticket = db_query_one("SELECT * FROM tickets WHERE subject ILIKE %s LIMIT 1", (f"%{identifier}%",))
+        ticket = db_query_one(
+            "SELECT * FROM tickets WHERE subject ILIKE %s AND access_tier::text = ANY(%s) LIMIT 1",
+            (f"%{identifier}%", clearance),
+        )
     if not ticket:
         return {"error": f"no ticket matching '{identifier}'"}
     ticket["events"] = db_query(
@@ -189,20 +270,26 @@ def get_ticket(identifier):
     return ticket
 
 
-def search_tickets(query):
+def search_tickets(query, clearance=FULL_CLEARANCE):
     return db_query(
         """SELECT ticket_number, client_raw, subject, status, priority, ticket_created
            FROM tickets
-           WHERE subject ILIKE %s OR client_raw ILIKE %s OR description ILIKE %s OR ticket_number ILIKE %s
+           WHERE (subject ILIKE %s OR client_raw ILIKE %s OR description ILIKE %s OR ticket_number ILIKE %s)
+             AND access_tier::text = ANY(%s)
            ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
-        tuple([f"%{query}%"] * 4),
+        tuple([f"%{query}%"] * 4) + (clearance,),
     )
 
 
-def get_invoice(identifier):
-    order = db_query_one("SELECT * FROM sales_orders WHERE order_number = %s", (identifier.upper(),))
+def get_invoice(identifier, clearance=FULL_CLEARANCE):
+    order = db_query_one(
+        "SELECT * FROM sales_orders WHERE order_number = %s AND access_tier::text = ANY(%s)", (identifier.upper(), clearance)
+    )
     if not order:
-        order = db_query_one("SELECT * FROM sales_orders WHERE client_raw ILIKE %s LIMIT 1", (f"%{identifier}%",))
+        order = db_query_one(
+            "SELECT * FROM sales_orders WHERE client_raw ILIKE %s AND access_tier::text = ANY(%s) LIMIT 1",
+            (f"%{identifier}%", clearance),
+        )
     if not order:
         return {"error": f"no sales order matching '{identifier}'"}
     order["lines"] = db_query(
@@ -212,13 +299,13 @@ def get_invoice(identifier):
     return order
 
 
-def search_invoices(query):
+def search_invoices(query, clearance=FULL_CLEARANCE):
     return db_query(
         """SELECT order_number, client_raw, order_date, amount_total, currency, state_label
            FROM sales_orders
-           WHERE client_raw ILIKE %s OR order_number ILIKE %s
+           WHERE (client_raw ILIKE %s OR order_number ILIKE %s) AND access_tier::text = ANY(%s)
            ORDER BY order_date DESC NULLS LAST LIMIT 20""",
-        (f"%{query}%", f"%{query}%"),
+        (f"%{query}%", f"%{query}%", clearance),
     )
 
 
@@ -240,7 +327,7 @@ def list_contacts(client=""):
     return db_query(sql, params)
 
 
-def get_client_profile(client):
+def get_client_profile(client, clearance=FULL_CLEARANCE):
     """Aggregates everything linked to one client by client_id in a single
     call -- every raw table (tickets, email_threads, call_transcripts,
     implementation_tasks, sales_orders) has a client_id column, but every
@@ -251,7 +338,11 @@ def get_client_profile(client):
     activity summaries across every source, cross-linked by client_id --
     not exhaustive detail (use get_ticket/get_email/get_call/
     get_implementation_task for that), but enough to see the whole
-    relationship at a glance and know what to drill into.
+    relationship at a glance and know what to drill into. Every recent-
+    activity list and count below is clearance-filtered the same as the
+    dedicated list_*/search_* tools -- a general-clearance caller sees
+    fewer tickets/tasks/emails/calls and lower counts for this client, not
+    an error.
 
     NOTE on scope: only searches LIVE tables. Synthesized wiki content for
     this client may exist in wiki_staging (reviewed, not yet promoted) --
@@ -273,34 +364,43 @@ def get_client_profile(client):
     )
     row["tickets"] = db_query(
         """SELECT ticket_number, subject, status, priority, ticket_created
-           FROM tickets WHERE client_id = %s ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
-        (client_id,),
+           FROM tickets WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY ticket_created DESC NULLS LAST LIMIT 20""",
+        (client_id, clearance),
     )
-    row["ticket_count"] = db_query_one("SELECT count(*) AS n FROM tickets WHERE client_id = %s", (client_id,))["n"]
+    row["ticket_count"] = db_query_one(
+        "SELECT count(*) AS n FROM tickets WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
+    )["n"]
     row["implementation_tasks_recent"] = db_query(
         """SELECT task_name, stage, owner, task_created_date
-           FROM implementation_tasks WHERE client_id = %s ORDER BY task_created_date DESC NULLS LAST LIMIT 20""",
-        (client_id,),
+           FROM implementation_tasks WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY task_created_date DESC NULLS LAST LIMIT 20""",
+        (client_id, clearance),
     )
     row["implementation_task_count"] = db_query_one(
-        "SELECT count(*) AS n FROM implementation_tasks WHERE client_id = %s", (client_id,)
+        "SELECT count(*) AS n FROM implementation_tasks WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
     )["n"]
     row["emails_recent"] = db_query(
         """SELECT id, source_account, subject FROM email_threads
-           WHERE client_id = %s ORDER BY id DESC LIMIT 20""",
-        (client_id,),
+           WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY id DESC LIMIT 20""",
+        (client_id, clearance),
     )
-    row["email_count"] = db_query_one("SELECT count(*) AS n FROM email_threads WHERE client_id = %s", (client_id,))["n"]
+    row["email_count"] = db_query_one(
+        "SELECT count(*) AS n FROM email_threads WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
+    )["n"]
     row["calls_recent"] = db_query(
         """SELECT id, source, meeting_title, call_date FROM call_transcripts
-           WHERE client_id = %s ORDER BY call_date DESC NULLS LAST LIMIT 20""",
-        (client_id,),
+           WHERE client_id = %s AND access_tier::text = ANY(%s) ORDER BY call_date DESC NULLS LAST LIMIT 20""",
+        (client_id, clearance),
     )
-    row["call_count"] = db_query_one("SELECT count(*) AS n FROM call_transcripts WHERE client_id = %s", (client_id,))["n"]
-    row["sales_orders_count"] = db_query_one("SELECT count(*) AS n FROM sales_orders WHERE client_id = %s", (client_id,))["n"]
+    row["call_count"] = db_query_one(
+        "SELECT count(*) AS n FROM call_transcripts WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
+    )["n"]
+    row["sales_orders_count"] = db_query_one(
+        "SELECT count(*) AS n FROM sales_orders WHERE client_id = %s AND access_tier::text = ANY(%s)", (client_id, clearance)
+    )["n"]
 
     row["live_wiki_pages"] = db_query(
-        "SELECT title, page_type FROM wiki_pages WHERE title ILIKE %s ORDER BY title", (f"%{row['display_name']}%",)
+        "SELECT title, page_type FROM wiki_pages WHERE title ILIKE %s AND access_tier::text = ANY(%s) ORDER BY title",
+        (f"%{row['display_name']}%", clearance),
     )
     staging_pending = db_query(
         """SELECT title, page_type, status FROM wiki_staging.wiki_pages
@@ -315,24 +415,27 @@ def get_client_profile(client):
     return row
 
 
-def get_client_file(file_path):
-    for table in ("tickets", "sales_orders", "call_transcripts", "wiki_pages"):
-        row = db_query_one(f"SELECT * FROM {table} WHERE source_file_path = %s", (file_path,))
+def get_client_file(file_path, clearance=FULL_CLEARANCE):
+    for table in ("tickets", "sales_orders", "call_transcripts"):
+        row = db_query_one(f"SELECT * FROM {table} WHERE source_file_path = %s AND access_tier::text = ANY(%s)", (file_path, clearance))
         if row:
-            row.pop("body_tsv", None)
             row.pop("transcript_tsv", None)
             return row
+    row = db_query_one("SELECT * FROM wiki_pages WHERE source_file_path = %s AND access_tier::text = ANY(%s)", (file_path, clearance))
+    if row:
+        row.pop("body_tsv", None)
+        return row
     return {"error": f"no row found for file_path '{file_path}' in any loaded table"}
 
 
-def list_implementation_tasks(client="", stage=""):
+def list_implementation_tasks(client="", stage="", clearance=FULL_CLEARANCE):
     sql = """
         SELECT it.id, c.slug AS client, it.project_name, it.task_name, it.stage, it.owner,
                it.priority, it.kanban_state, it.active, it.task_created_date, it.deadline
         FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
-        WHERE 1=1
+        WHERE it.access_tier::text = ANY(%s)
     """
-    params = []
+    params = [clearance]
     if client:
         sql += " AND c.slug = %s"
         params.append(client)
@@ -343,14 +446,14 @@ def list_implementation_tasks(client="", stage=""):
     return db_query(sql, params)
 
 
-def search_implementation_tasks(query, client=""):
+def search_implementation_tasks(query, client="", clearance=FULL_CLEARANCE):
     sql = """
         SELECT it.id, c.slug AS client, it.task_name, it.stage, it.owner, it.priority,
                it.task_created_date
         FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
-        WHERE (it.task_name ILIKE %s OR it.description ILIKE %s)
+        WHERE (it.task_name ILIKE %s OR it.description ILIKE %s) AND it.access_tier::text = ANY(%s)
     """
-    params = [f"%{query}%", f"%{query}%"]
+    params = [f"%{query}%", f"%{query}%", clearance]
     if client:
         sql += " AND c.slug = %s"
         params.append(client)
@@ -358,7 +461,7 @@ def search_implementation_tasks(query, client=""):
     return db_query(sql, params)
 
 
-def get_implementation_task(task_id):
+def get_implementation_task(task_id, clearance=FULL_CLEARANCE):
     """Looks up by the serial `id` first, falling back to `odoo_task_id`.
     The fallback exists because odoo_fetcher.py full-refreshes (DELETE+
     INSERT) this table on every raw-ingestion sweep, so `id` isn't stable
@@ -367,19 +470,25 @@ def get_implementation_task(task_id):
     after first seeing it) needs a lookup that still resolves after `id`
     has shifted. The two id spaces don't overlap (id: 15000s+, odoo_task_id:
     under 1000, verified empirically), so trying `id` first is unambiguous
-    and doesn't change behavior for any existing caller passing a real id."""
+    and doesn't change behavior for any existing caller passing a real id.
+
+    NOTE: odoo_task_id collides across different clients (the same task
+    number can exist for multiple clients' Odoo instances) -- this lookup
+    doesn't disambiguate by client, matching existing behavior (first
+    match wins). Same caveat applies to wiki citations that reference
+    odoo_task_id; not fixed here."""
     task = db_query_one(
         """SELECT it.*, c.slug AS client_slug, c.display_name AS client_name
            FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
-           WHERE it.id = %s""",
-        (task_id,),
+           WHERE it.id = %s AND it.access_tier::text = ANY(%s)""",
+        (task_id, clearance),
     )
     if not task:
         task = db_query_one(
             """SELECT it.*, c.slug AS client_slug, c.display_name AS client_name
                FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
-               WHERE it.odoo_task_id = %s""",
-            (task_id,),
+               WHERE it.odoo_task_id = %s AND it.access_tier::text = ANY(%s)""",
+            (task_id, clearance),
         )
     if not task:
         return {"error": f"no implementation task with id or odoo_task_id={task_id}"}
@@ -395,6 +504,15 @@ def get_implementation_task(task_id):
     return task
 
 
+# Tools that take a clearance kwarg -- everything else (wiki, clients, contacts)
+# is untiered (list_clients/list_contacts -- no access_tier column at all).
+TIER_FILTERED_TOOLS = {
+    "get_index", "get_wiki_page", "search_wiki", "list_emails", "search_emails", "get_email", "get_attachment_text",
+    "list_calls", "search_calls", "get_call", "get_ticket", "search_tickets", "get_invoice", "search_invoices",
+    "get_client_profile", "get_client_file", "list_implementation_tasks", "search_implementation_tasks",
+    "get_implementation_task",
+}
+
 TOOLS = {
     "get_index": get_index,
     "get_wiki_page": get_wiki_page,
@@ -402,6 +520,7 @@ TOOLS = {
     "list_emails": list_emails,
     "search_emails": search_emails,
     "get_email": get_email,
+    "get_attachment_text": get_attachment_text,
     "list_calls": list_calls,
     "search_calls": search_calls,
     "get_call": get_call,
@@ -419,8 +538,7 @@ TOOLS = {
 }
 
 
-@server.list_tools()
-async def list_tools():
+def _tool_defs():
     return [
         Tool(
             name="get_index",
@@ -457,6 +575,13 @@ async def list_tools():
                         "result. Also accepts a legacy source_file_path string, but every live-ingested (Gmail/"
                         "Zoho) thread has a NULL source_file_path -- use 'id' for those, which is always present.",
             inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
+        ),
+        Tool(
+            name="get_attachment_text",
+            description="Return the extracted text content of one email attachment, by the 'id' from get_email's "
+                        "attachments list. Only pdf/docx/xlsx/csv attachments have extracted text -- check "
+                        "get_email's text_extracted flag on the attachment first.",
+            inputSchema={"type": "object", "properties": {"attachment_id": {"type": "string"}}, "required": ["attachment_id"]},
         ),
         Tool(
             name="list_calls",
@@ -548,16 +673,53 @@ async def list_tools():
     ]
 
 
-@server.call_tool()
-async def call_tool(name, arguments):
-    if name not in TOOLS:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-    func = TOOLS[name]
-    try:
-        result = func(**(arguments or {}))
-    except Exception as e:
-        result = {"error": f"{type(e).__name__}: {e}"}
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+def build_server(clearance, name="eoxs-wiki-db"):
+    """Builds a fresh Server instance whose tier-filtered tools are all
+    bound to `clearance`. Each identity (stdio/local, or one HTTP/SSE
+    secret path) gets its OWN Server instance from this -- clearance is
+    baked in at construction time via functools.partial, never read from
+    a request, so nothing an MCP client sends can change which rows it
+    can see."""
+    tools = {
+        tool_name: (functools.partial(func, clearance=clearance) if tool_name in TIER_FILTERED_TOOLS else func)
+        for tool_name, func in TOOLS.items()
+    }
+    srv = Server(name)
+
+    @srv.list_tools()
+    async def list_tools():
+        return _tool_defs()
+
+    @srv.call_tool()
+    async def call_tool(tool_name, arguments):
+        if tool_name not in tools:
+            return [TextContent(type="text", text=f"Unknown tool: {tool_name}")]
+        func = tools[tool_name]
+        try:
+            result = func(**(arguments or {}))
+        except Exception as e:
+            result = {"error": f"{type(e).__name__}: {e}"}
+        else:
+            # Query-time redaction safety net (mcp_server/redaction.py) --
+            # a SECOND, independent check on top of the access_tier SQL
+            # filtering above, catching cases where the original tier
+            # CLASSIFICATION was wrong. Skipped for FULL_CLEARANCE, which
+            # has nothing to check against. Never runs on an already-
+            # errored result -- nothing to redact from an error message.
+            if "tier1" not in clearance:
+                result = await redaction.check_and_redact(result, clearance, tool_name, clearance_name=name)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    return srv
+
+
+# Local/stdio access (Claude Code CLI, Claude Desktop) -- full clearance,
+# since running this file at all already requires the .env Postgres
+# credentials, i.e. trusted-equivalent access with no narrower boundary
+# to enforce here. The HTTP/SSE transport in http_server.py builds its
+# own separate, narrower instance(s) via build_server() instead of using
+# this one.
+server = build_server(FULL_CLEARANCE)
 
 
 async def main():

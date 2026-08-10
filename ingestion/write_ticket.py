@@ -12,9 +12,12 @@ staging.
 
 def write_ticket(conn, *, odoo_id, ticket_number, client_raw, client_id, subject, status,
                   priority, assigned_to, ticket_created, ticket_closed, tags, description,
-                  generated_at, events, attachments):
+                  generated_at, events, attachments, access_tier="tier1"):
     """events: list of dicts {odoo_msg_id, event_type, author, event_time, body}.
     attachments: list of dicts {filename, mimetype, size_bytes}.
+    access_tier: caller's responsibility to classify (ingestion.inline_tier_classifier).
+    Only applied on the INITIAL insert (excluded from DO UPDATE SET below), matching every
+    other tiered table's convention. Defaults to 'tier1' (fail closed).
     Returns the ticket's DB id (from the live connection's perspective when
     called via dual_write; staging's return value is discarded by the caller)."""
     with conn.cursor() as cur:
@@ -23,8 +26,8 @@ def write_ticket(conn, *, odoo_id, ticket_number, client_raw, client_id, subject
             INSERT INTO tickets (
                 odoo_id, ticket_number, client_raw, client_id, subject, status, priority,
                 assigned_to, ticket_created, ticket_closed, tags, description,
-                generated_at, source_file_path, source_file_mtime
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
+                generated_at, access_tier, source_file_path, source_file_mtime
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
             ON CONFLICT (ticket_number) DO UPDATE SET
                 odoo_id = EXCLUDED.odoo_id,
                 client_raw = EXCLUDED.client_raw,
@@ -44,6 +47,7 @@ def write_ticket(conn, *, odoo_id, ticket_number, client_raw, client_id, subject
             (
                 odoo_id, ticket_number, client_raw, client_id, subject, status, priority,
                 assigned_to, ticket_created, ticket_closed, tags, description, generated_at,
+                access_tier,
             ),
         )
         ticket_id = cur.fetchone()["id"]

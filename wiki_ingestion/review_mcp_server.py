@@ -30,7 +30,12 @@ from ingestion.db import get_live_conn
 from mcp_server.db import query as db_query, query_one as db_query_one
 from mcp_server import server as read_tools
 
-server = Server("wiki-review-agent")
+# 2026-08 transport change: build_review_server() below is now a factory
+# (no state needs to be scoped per-connection here, unlike agent_mcp_server
+# -- every tool takes staging_page_id explicitly), built fresh per SSE
+# connection by wiki_ingestion/mcp_http_server.py instead of being spawned
+# as a stdio subprocess per invocation. See agent_mcp_server.py's module
+# docstring for the full incident/rationale.
 
 
 def get_staging_page(staging_page_id):
@@ -86,58 +91,65 @@ WRITE_TOOLS = {
     "mark_rejected": mark_rejected,
 }
 
-READ_TOOLS = dict(read_tools.TOOLS)
-TOOLS = {**READ_TOOLS, **WRITE_TOOLS}
+TOOLS = {**dict(read_tools.TOOLS), **WRITE_TOOLS}
+
+TOOL_DEFS = [
+    Tool(
+        name="get_staging_page",
+        description="Read one staging draft's full content (body, tags, entity_class, sources_raw) "
+                    "plus its citations, flags, and links, by staging page id.",
+        inputSchema={"type": "object", "properties": {
+            "staging_page_id": {"type": "integer"},
+        }, "required": ["staging_page_id"]},
+    ),
+    Tool(
+        name="mark_reviewed",
+        description="Approve a draft for promotion -- call after verifying its citations against the "
+                    "actual raw source rows (using the read tools) and judging it genuinely useful, "
+                    "well-formed content (not noise). Only works on a draft-status page.",
+        inputSchema={"type": "object", "properties": {
+            "staging_page_id": {"type": "integer"}, "notes": {"type": "string"},
+        }, "required": ["staging_page_id"]},
+    ),
+    Tool(
+        name="mark_rejected",
+        description="Reject a draft -- call when citations don't check out, content is noise/near-empty, "
+                    "or it's otherwise not worth promoting. reason is required and should be specific "
+                    "enough that someone reading it later understands why. Only works on a draft-status page.",
+        inputSchema={"type": "object", "properties": {
+            "staging_page_id": {"type": "integer"}, "reason": {"type": "string"},
+        }, "required": ["staging_page_id", "reason"]},
+    ),
+]
 
 
-@server.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="get_staging_page",
-            description="Read one staging draft's full content (body, tags, entity_class, sources_raw) "
-                        "plus its citations, flags, and links, by staging page id.",
-            inputSchema={"type": "object", "properties": {
-                "staging_page_id": {"type": "integer"},
-            }, "required": ["staging_page_id"]},
-        ),
-        Tool(
-            name="mark_reviewed",
-            description="Approve a draft for promotion -- call after verifying its citations against the "
-                        "actual raw source rows (using the read tools) and judging it genuinely useful, "
-                        "well-formed content (not noise). Only works on a draft-status page.",
-            inputSchema={"type": "object", "properties": {
-                "staging_page_id": {"type": "integer"}, "notes": {"type": "string"},
-            }, "required": ["staging_page_id"]},
-        ),
-        Tool(
-            name="mark_rejected",
-            description="Reject a draft -- call when citations don't check out, content is noise/near-empty, "
-                        "or it's otherwise not worth promoting. reason is required and should be specific "
-                        "enough that someone reading it later understands why. Only works on a draft-status page.",
-            inputSchema={"type": "object", "properties": {
-                "staging_page_id": {"type": "integer"}, "reason": {"type": "string"},
-            }, "required": ["staging_page_id", "reason"]},
-        ),
-    ] + await read_tools.list_tools()
+def build_review_server():
+    """Fresh Server instance per call -- see module docstring."""
+    srv = Server("wiki-review-agent")
+
+    @srv.list_tools()
+    async def list_tools():
+        return TOOL_DEFS + read_tools._tool_defs()
+
+    @srv.call_tool()
+    async def call_tool(name, arguments):
+        if name not in TOOLS:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        func = TOOLS[name]
+        try:
+            result = func(**(arguments or {}))
+        except Exception as e:
+            result = {"error": f"{type(e).__name__}: {e}"}
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    return srv
 
 
-@server.call_tool()
-async def call_tool(name, arguments):
-    if name not in TOOLS:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-    func = TOOLS[name]
-    try:
-        result = func(**(arguments or {}))
-    except Exception as e:
-        result = {"error": f"{type(e).__name__}: {e}"}
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
-
-
-async def main():
+async def _main():
+    srv = build_review_server()
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await srv.run(read_stream, write_stream, srv.create_initialization_options())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_main())

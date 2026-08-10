@@ -1,0 +1,33 @@
+-- Access-tier redesign: 2 tiers -> 3 levels, per explicit correction after
+-- the first bulk classification run. The original design conflated "Raj's
+-- personal data" and "company-confidential data" into one tier1 bucket;
+-- that's wrong -- they need different audiences:
+--
+--   tier1              Raj's own personal data ONLY (bank statements,
+--                      divorce, family/personal-life matters). No company
+--                      business lives here anymore, even if company-
+--                      sensitive -- salary/payroll moves to
+--                      tier2_confidential below.
+--   tier2_confidential Company-confidential: salary/payroll/compensation/
+--                      incentive/bonus for ANY employee, investor
+--                      relations & fundraising, company financial
+--                      statements/bank data, vendor payment terms /
+--                      sensitive pricing contracts, legal/compliance
+--                      matters (non-Raj-personal). Visible to Raj + HR/
+--                      other explicitly-trusted roles.
+--   tier2              General -- everything else, company-wide visible.
+--                      Unchanged meaning from before.
+--
+-- Clearance is additive by role, not exclusive: Raj sees all three
+-- levels; HR/trusted sees tier2_confidential + tier2; everyone else sees
+-- tier2 only. Enforced the same way as before (access_tier = ANY(caller's
+-- clearance list)) -- this migration only changes the label set, not the
+-- enforcement mechanism.
+--
+-- Every row currently tagged tier1 or tier2 needs re-classification under
+-- the new definitions (NOT a mechanical remap) -- tier2_confidential is
+-- broader than the old tier1's "salary/payroll" slice (adds investor
+-- relations, vendor contracts, legal/compliance), so a full re-scan of
+-- every raw row and every wiki page is required, not just the old tier1
+-- set. See ingestion/tier_classifier.py and wiki_ingestion/tier_classifier.py.
+ALTER TYPE access_tier ADD VALUE IF NOT EXISTS 'tier2_confidential' AFTER 'tier1';

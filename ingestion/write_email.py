@@ -10,14 +10,20 @@ from datetime import timezone
 
 def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, to_addr,
                   message_count, participants, thread_dates, tags, is_quarantined,
-                  generated_at, messages, attachments_by_message_index=None, client_id=None):
+                  generated_at, messages, attachments_by_message_index=None, client_id=None,
+                  access_tier="tier1"):
     """messages: list of dicts {message_index, message_date, from_addr, body, message_ids}
-    attachments_by_message_index: dict {message_index: [{filename, relative_path, size_bytes,
-    note, source_attachment_id, mimetype, extracted_text}]} -- the last three are populated by
-    the fetcher's attachment_extract call, None/missing for attachments it couldn't extract.
+    attachments_by_message_index: dict {message_index: [{filename, relative_path, size_bytes, note,
+    source_attachment_id, mimetype, extracted_text}]}
     client_id: from ingestion.routing.classify_client(index, participants), or None if no
     participant matched a known client contact/domain -- caller's responsibility to classify,
     this just stores the result (matches call_transcripts' existing client_id pattern).
+    access_tier: caller's responsibility to classify (ingestion.inline_tier_classifier),
+    same pattern as client_id -- only applied on the INITIAL insert (see ON CONFLICT below,
+    access_tier deliberately excluded from DO UPDATE SET so a thread's tier, once computed,
+    survives every later append of new messages to it -- matches every other tiered table's
+    convention). Defaults to 'tier1' (fail closed) so a caller that doesn't classify (e.g. an
+    old test/dry-run path) never accidentally creates an unrestricted row.
     Returns the thread's DB id (from the live connection's perspective when
     called via dual_write; staging's return value is discarded by the caller)."""
     attachments_by_message_index = attachments_by_message_index or {}
@@ -28,8 +34,8 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
             INSERT INTO email_threads (
                 source_account, gmail_thread_id, subject, from_addr, to_addr,
                 message_count, participants, thread_dates, tags, is_quarantined,
-                generated_at, client_id, source_file_path, source_file_mtime
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
+                generated_at, client_id, access_tier, source_file_path, source_file_mtime
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,now())
             ON CONFLICT (source_account, gmail_thread_id) DO UPDATE SET
                 subject = EXCLUDED.subject,
                 from_addr = EXCLUDED.from_addr,
@@ -47,7 +53,7 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
             (
                 source_account, gmail_thread_id, subject, from_addr, to_addr,
                 message_count, participants, thread_dates, tags, is_quarantined,
-                generated_at, client_id,
+                generated_at, client_id, access_tier,
             ),
         )
         thread_id = cur.fetchone()["id"]
@@ -80,8 +86,8 @@ def write_thread(conn, *, source_account, gmail_thread_id, subject, from_addr, t
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (thread_id, message_id, att["filename"], att.get("relative_path"),
-                     att.get("size_bytes"), att.get("note"), att.get("source_attachment_id"),
-                     att.get("mimetype"), att.get("extracted_text")),
+                     att.get("size_bytes"), att.get("note"),
+                     att.get("source_attachment_id"), att.get("mimetype"), att.get("extracted_text")),
                 )
 
     conn.commit()

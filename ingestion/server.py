@@ -49,8 +49,10 @@ from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
 from ingestion.tickets_fetcher import process_tickets
+from ingestion.invoice_fetcher import process_invoices
 from ingestion.ingest_log import log_run
-from ingestion.linear_report import report_full_sweep
+from ingestion.linear_report import start_sweep_parent, finish_sweep_parent, start_source_task, finish_source_task
+from ingestion.state import now_utc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.server")
@@ -93,7 +95,18 @@ def run_gmail_all():
 
 
 def run_full_sweep():
-    """Every source, once. Used by the daily cron fallback and /trigger/manual."""
+    """Every source, once. Used by the daily cron fallback and /trigger/manual.
+
+    Reports granularly to Linear as it goes (2026-08 redesign): one parent
+    issue for the whole sweep, created before the first source runs, and
+    one child task per source, created right before that source's fetch
+    call and updated immediately after with its real outcome -- not one
+    aggregate issue built after everything already finished. Reporting is
+    unconditional here now (moved out of the caller-controlled
+    report_to_linear flag in _run_bg/main, since every current caller of
+    run_full_sweep() wants it)."""
+    run_at = now_utc()
+    parent_issue_id = start_sweep_parent()
     summary = {}
     for name, fn in [
         ("gmail", run_gmail_all),
@@ -102,21 +115,26 @@ def run_full_sweep():
         ("fathom", process_fathom),
         ("odoo", odoo_process_all),
         ("tickets", process_tickets),
+        ("invoices", process_invoices),
     ]:
+        task_issue_id = start_source_task(parent_issue_id, name)
         try:
             summary[name] = fn()
         except Exception as e:
             logger.error("sweep source=%s failed: %s", name, e)
             summary[name] = {"error": str(e)}
+        finish_source_task(task_issue_id, name, summary[name])
+    finish_sweep_parent(parent_issue_id, summary, run_at)
     return summary
 
 
-async def _run_bg(trigger_source, fn, *args, report_to_linear=False, **kwargs):
-    """report_to_linear is True only for full-sweep triggers (manual
-    endpoint) -- NOT individual-source webhook triggers (a single new
-    Gmail message or Fireflies call would otherwise flood the EDB board
-    with an issue apiece). ingest_log.log_run still records every
-    trigger, webhook or sweep, regardless."""
+async def _run_bg(trigger_source, fn, *args, **kwargs):
+    """Linear reporting for full sweeps now happens INSIDE run_full_sweep()
+    itself (granular, per-source), not here -- individual-source webhook
+    triggers (gmail/fireflies/fathom) call their own fetcher directly, not
+    run_full_sweep(), so they still never touch Linear (a single new Gmail
+    message shouldn't flood the EDB board). ingest_log.log_run still
+    records every trigger, webhook or sweep, regardless."""
     if _sweep_lock.locked():
         logger.info("Run already in progress -- skipping duplicate trigger from %s", trigger_source)
         return
@@ -130,8 +148,6 @@ async def _run_bg(trigger_source, fn, *args, report_to_linear=False, **kwargs):
             _last_run["status"] = "ok"
             _last_run["counts"] = counts
             log_run(trigger_source, counts)
-            if report_to_linear:
-                report_full_sweep(counts)
         except Exception as e:
             logger.error("run triggered by %s failed: %s", trigger_source, e)
             _last_run["status"] = "error"
@@ -229,7 +245,7 @@ async def manual_trigger(request: Request, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     logger.info("Manual full-sweep trigger received.")
-    background_tasks.add_task(_run_bg, "manual", run_full_sweep, report_to_linear=True)
+    background_tasks.add_task(_run_bg, "manual", run_full_sweep)
     return JSONResponse({"status": "sweep started"}, status_code=202)
 
 
@@ -245,8 +261,8 @@ def main():
         # runs `python -m ingestion.server --sweep` directly, not through the FastAPI
         # app) -- previously it only logged via Python logging and never called
         # log_run/report_full_sweep at all, so ingest_log/EDB never saw these runs.
+        # Linear reporting now happens granularly INSIDE run_full_sweep() itself.
         log_run("cron", summary)
-        report_full_sweep(summary)
         return
 
     import uvicorn

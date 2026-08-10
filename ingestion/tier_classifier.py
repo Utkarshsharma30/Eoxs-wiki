@@ -1,24 +1,36 @@
-"""Bulk access-tier classifier for Cruz's tiered access system -- one-time
-job over the historical backlog. Reads real content, decides tier1
-(CEO-only) vs tier2 (general), fail-closed (stays tier1) on any
-uncertainty, API error, or exhausted retries.
+"""Bulk access-tier classifier for Cruz's tiered access system. Reads real
+content, decides one of three levels, fail-closed (more restrictive) on
+any uncertainty, API error, or exhausted retries:
 
-Same model/single-word-verdict pattern as spam_filter.py, but async +
-concurrent (capped via CONCURRENCY) since this runs once over ~18,600
-rows rather than inline per-item during live ingestion. Confirmed with
-the user: concurrency=10, accept ~45-50 min wall-clock in exchange for a
-large safety margin against rate limits, with real retry/backoff (not
-just hoping) if one is hit anyway.
+  tier1              Raj's own personal data ONLY (bank statements,
+                      divorce, family/personal-life matters). No company
+                      business, even if company-sensitive.
+  tier2_confidential Company-confidential: salary/payroll/compensation/
+                      incentive/bonus for ANY employee, investor relations
+                      & fundraising, company financial statements/bank
+                      data, vendor payment terms / sensitive pricing
+                      contracts, legal/compliance matters (non-Raj-
+                      personal).
+  tier2              General -- everything else, company-wide visible.
 
-Going forward (not built here yet): live ingestion's write path should
-set access_tier inline, the same way spam_filter.py already gates
-writes -- this script is specifically for the pre-existing backlog that
-predates the access-tier system.
+Second-generation version of this script: the first one only had 2 levels
+(tier1 = Raj-personal + company-confidential conflated together) and only
+classified the fraction of rows that survived a SQL pre-filter (domain/
+keyword-based). Both are gone now -- every row in every table gets a real
+LLM read, no pre-filter, no "structurally safe, skip" shortcut for
+tickets/sales_orders/implementation_tasks -- the broader confidential
+definition (legal/compliance, vendor contracts) could plausibly appear
+anywhere, and the whole point of the redo is not repeating the "shallow
+filter missed real matches" mistake found in the first version.
+
+Writes are incremental (one UPDATE per row immediately after its verdict,
+not batched at the end) -- the first version's first run was killed
+mid-flight and lost 100% of its progress because it only wrote at the very
+end.
 """
 import asyncio
 import logging
 import os
-import sys
 import time
 
 import anthropic
@@ -35,32 +47,44 @@ MAX_RETRIES = 5
 
 _PROMPT = """You are classifying an item in Cruz, EOXS's internal knowledge base, for access control.
 
-Decide TIER1 (CEO-only, hidden from every other employee) or TIER2 (general, visible company-wide).
+Decide exactly one of three levels:
 
-Mark TIER1 ONLY if the content is clearly:
-- Rajat "Raj" Jain's personal financial information (bank statements, personal investments, personal taxes)
+TIER1 -- Rajat "Raj" Jain's own PERSONAL data only:
+- Raj's personal financial information (bank statements, personal investments, personal taxes)
 - Divorce, family, or other personal/private life matters involving Raj
-- Salary, payroll, compensation, incentive, or bonus figures for ANY employee (including Raj's own)
 - Any other content that is personal to Raj rather than EOXS company business
+Do NOT use TIER1 for company business, even if Raj is the sender/participant and even if it's
+company-sensitive -- that belongs in TIER2_CONFIDENTIAL below.
 
-Mark TIER2 for everything else, including ordinary business correspondence, client work, scheduling,
-internal operations, and professional discussions -- even if Raj is a participant. When genuinely
-uncertain, prefer TIER1 (fail closed -- this system defaults to restricting anything ambiguous rather
-than risk exposing something sensitive).
+TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
+- Salary, payroll, compensation, incentive, or bonus figures for ANY employee (including Raj's own)
+- Investor relations and fundraising
+- Company financial statements or bank/accounting data
+- Vendor payment terms or contracts with sensitive pricing
+- Legal or compliance matters (that are NOT Raj's personal legal matters)
+
+TIER2 -- General, visible company-wide: ordinary business correspondence, client implementation/
+support work, product/ops, sales orders, scheduling, recruiting (non-compensation details), and
+other everyday professional content -- the default for anything not clearly TIER1 or
+TIER2_CONFIDENTIAL.
+
+When genuinely uncertain between two adjacent levels, prefer the more restrictive one (fail closed):
+TIER2_CONFIDENTIAL over TIER2, or TIER1 over TIER2_CONFIDENTIAL if it's plausibly Raj's personal
+matter rather than company business.
 
 {context}
 
-Answer with exactly one word: TIER1 or TIER2."""
+Answer with exactly one word: TIER1, TIER2_CONFIDENTIAL, or TIER2."""
+
+_VALID = {"TIER1": "tier1", "TIER2_CONFIDENTIAL": "tier2_confidential", "TIER2": "tier2"}
 
 
 def _fetch_pending(conn):
-    """Every row currently access_tier='tier1' across the four tables that
-    need real classification (the ones already resolved via SQL --
-    non-raj_gmail emails, known-domain calls, non-keyword tickets/tasks --
-    are already tier2 and never reach this function)."""
+    """Every row in every tiered table -- full re-scan, not just the
+    previous version's tier1 set (see module docstring)."""
     items = []
     with conn.cursor() as cur:
-        cur.execute("SELECT id, subject FROM email_threads WHERE access_tier = 'tier1'")
+        cur.execute("SELECT id, subject FROM email_threads")
         thread_rows = cur.fetchall()
         for t in thread_rows:
             cur.execute(
@@ -71,21 +95,32 @@ def _fetch_pending(conn):
             context = f"Email subject: {t['subject']}\nBody (truncated):\n{body[:_MAX_CONTEXT_CHARS]}"
             items.append(("email_threads", t["id"], context))
 
-        cur.execute("SELECT id, meeting_title, fireflies_summary, transcript_body FROM call_transcripts WHERE access_tier = 'tier1'")
+        cur.execute("SELECT id, meeting_title, fireflies_summary, transcript_body FROM call_transcripts")
         for c in cur.fetchall():
             snippet = c["fireflies_summary"] or (c["transcript_body"] or "")[:_MAX_CONTEXT_CHARS]
             context = f"Call title: {c['meeting_title']}\nSummary/transcript (truncated):\n{snippet[:_MAX_CONTEXT_CHARS]}"
             items.append(("call_transcripts", c["id"], context))
 
-        cur.execute("SELECT id, subject, description FROM tickets WHERE access_tier = 'tier1'")
+        cur.execute("SELECT id, subject, description FROM tickets")
         for t in cur.fetchall():
             context = f"Support ticket subject: {t['subject']}\nDescription (truncated):\n{(t['description'] or '')[:_MAX_CONTEXT_CHARS]}"
             items.append(("tickets", t["id"], context))
 
-        cur.execute("SELECT id, task_name, description FROM implementation_tasks WHERE access_tier = 'tier1'")
+        cur.execute("SELECT id, task_name, description FROM implementation_tasks")
         for t in cur.fetchall():
             context = f"Implementation task: {t['task_name']}\nDescription (truncated):\n{(t['description'] or '')[:_MAX_CONTEXT_CHARS]}"
             items.append(("implementation_tasks", t["id"], context))
+
+        cur.execute(
+            "SELECT id, order_number, client_raw, amount_total, currency, state_label, salesperson FROM sales_orders"
+        )
+        for s in cur.fetchall():
+            context = (
+                f"Sales order: {s['order_number']} | client: {s['client_raw']} | "
+                f"amount: {s['amount_total']} {s['currency']} | state: {s['state_label']} | "
+                f"salesperson: {s['salesperson']}"
+            )
+            items.append(("sales_orders", s["id"], context))
     return items
 
 
@@ -94,11 +129,15 @@ async def _classify_one(client, sem, context):
         for attempt in range(MAX_RETRIES):
             try:
                 resp = await client.messages.create(
-                    model=_MODEL, max_tokens=5,
+                    model=_MODEL, max_tokens=8,
                     messages=[{"role": "user", "content": _PROMPT.format(context=context)}],
                 )
                 answer = resp.content[0].text.strip().upper()
-                return "tier2" if "TIER2" in answer else "tier1"
+                if "TIER2_CONFIDENTIAL" in answer:
+                    return "tier2_confidential"
+                if "TIER1" in answer:
+                    return "tier1"
+                return "tier2"
             except anthropic.RateLimitError:
                 wait = min(2 ** attempt * 2, 60)
                 logger.warning("rate limited, retrying in %ss (attempt %d/%d)", wait, attempt + 1, MAX_RETRIES)
@@ -110,19 +149,26 @@ async def _classify_one(client, sem, context):
         return "tier1"
 
 
-async def _run(items):
+async def _run(conn, items):
     # Deliberately a separate key from ANTHROPIC_API_KEY (used by spam_filter.py and
     # everything else) -- the user wants this bulk job's usage/cost trackable on its
     # own in the Anthropic console, not blended into the main key's usage.
     client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = [None] * len(items)
     completed = 0
+    counts = {"tier1": 0, "tier2_confidential": 0, "tier2": 0}
     start = time.monotonic()
 
-    async def worker(i, context):
+    async def worker(table, row_id, context):
         nonlocal completed
-        results[i] = await _classify_one(client, sem, context)
+        verdict = await _classify_one(client, sem, context)
+        # Synchronous write right after the (awaited, concurrent) LLM call
+        # returns -- never interleaved with another await, so sharing one
+        # psycopg2 connection across these coroutines is safe.
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {table} SET access_tier = %s WHERE id = %s", (verdict, row_id))
+        conn.commit()
+        counts[verdict] += 1
         completed += 1
         if completed % 200 == 0 or completed == len(items):
             elapsed = time.monotonic() - start
@@ -130,8 +176,8 @@ async def _run(items):
             eta = (len(items) - completed) / rate if rate else 0
             logger.info("progress: %d/%d (%.1f/s, ~%.0fs remaining)", completed, len(items), rate, eta)
 
-    await asyncio.gather(*(worker(i, ctx) for i, (_, _, ctx) in enumerate(items)))
-    return results
+    await asyncio.gather(*(worker(table, row_id, ctx) for table, row_id, ctx in items))
+    return counts
 
 
 def main():
@@ -143,21 +189,17 @@ def main():
             logger.info("nothing to classify")
             return
 
-        results = asyncio.run(_run(items))
-
-        by_table = {}
-        for (table, row_id, _), verdict in zip(items, results):
-            by_table.setdefault(table, {"tier1": [], "tier2": []})[verdict].append(row_id)
+        counts = asyncio.run(_run(conn, items))
+        logger.info(
+            "totals: %d -> tier1, %d -> tier2_confidential, %d -> tier2",
+            counts["tier1"], counts["tier2_confidential"], counts["tier2"],
+        )
 
         with conn.cursor() as cur:
-            for table, verdicts in by_table.items():
-                for tier, ids in verdicts.items():
-                    if ids:
-                        cur.execute(f"UPDATE {table} SET access_tier = %s WHERE id = ANY(%s)", (tier, ids))
-        conn.commit()
-
-        for table, verdicts in by_table.items():
-            logger.info("%s: %d -> tier1, %d -> tier2", table, len(verdicts["tier1"]), len(verdicts["tier2"]))
+            for table in ("email_threads", "call_transcripts", "tickets", "implementation_tasks", "sales_orders"):
+                cur.execute(f"SELECT access_tier, count(*) FROM {table} GROUP BY access_tier")
+                for row in cur.fetchall():
+                    logger.info("%s: %s = %d", table, row["access_tier"], row["count"])
     finally:
         conn.close()
 

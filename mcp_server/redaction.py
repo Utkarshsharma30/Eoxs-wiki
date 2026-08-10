@@ -38,16 +38,6 @@ Design, confirmed 2026-08:
 - Every time this actually redacts something, it's logged to
   mcp_redaction_log (schema/023_mcp_redaction_log.sql) so the underlying
   page/row's tier can be corrected at the source.
-
-Reconstructed 2026-08-07: the original source was lost from disk (see
-memory note eoxs-wiki-db-live-vs-disk) while still running live in
-mcp_server.http_server's process memory. Recovered from
-mcp_server/__pycache__/redaction.cpython-312.pyc via bytecode
-disassembly (decompyle3 doesn't support 3.12 bytecode) -- faithful to
-the original's names, strings, control flow, and docstrings as read
-directly from the compiled constants; not independently re-verified
-against live behavior beyond what was already confirmed for
-check_and_redact's caller-visible effects (see the same memory note).
 """
 import json
 import logging
@@ -60,22 +50,24 @@ from ingestion.db import get_live_conn
 logger = logging.getLogger("mcp_server.redaction")
 
 _MODEL = "claude-sonnet-5"
-_MAX_CHARS = 20000
+_MAX_CHARS = 20000  # hard cap against pathologically large responses (e.g. get_client_profile)
 _MAX_RETRIES = 3
+
 _BLOCKED_RESULT = {"error": "This information is temporarily unavailable. Please try again."}
 
 _TIER_DEFINITIONS = {
     "tier1": (
-        "Rajat \"Raj\" Jain's own PERSONAL data -- his personal financial information "
+        'Rajat "Raj" Jain\'s own PERSONAL data -- his personal financial information '
         "(bank statements, personal investments, personal taxes), divorce/family/other "
         "personal-life matters involving Raj. NOT company business, even if Raj is a "
         "participant -- that belongs under tier2_confidential below, not here."
     ),
     "tier2_confidential": (
-        "EOXS company-confidential business data -- salary/payroll/compensation/incentive/bonus "
-        "figures for ANY employee, investor relations and fundraising, company financial "
-        "statements or bank/accounting data, vendor payment terms or sensitive contract pricing, "
-        "legal or compliance matters (that are not Raj's personal legal matters)."
+        "EOXS company-confidential business data -- salary/payroll/compensation/incentive/"
+        "bonus figures for ANY employee, investor relations and fundraising, company "
+        "financial statements or bank/accounting data, vendor payment terms or sensitive "
+        "contract pricing, legal or compliance matters (that are not Raj's personal legal "
+        "matters)."
     ),
 }
 
@@ -105,19 +97,26 @@ def _restricted_tiers(clearance):
 
 
 def _walk_strings(obj):
+    """Yields every string leaf value in a JSON-like structure (arbitrarily
+    nested dicts/lists). Used instead of comparing against a json.dumps()
+    blob -- see the 2026-08 incident note in check_and_redact for why."""
     if isinstance(obj, dict):
         for v in obj.values():
             yield from _walk_strings(v)
-        return
-    if isinstance(obj, list):
+    elif isinstance(obj, list):
         for v in obj:
             yield from _walk_strings(v)
-        return
-    if isinstance(obj, str):
+    elif isinstance(obj, str):
         yield obj
 
 
 def _replace_in_structure(obj, replacements):
+    """Returns a new structure with every occurrence of each key in
+    `replacements` (exact substring -> replacement text) replaced within
+    every string leaf, recursively. Non-string leaves pass through
+    unchanged. Operates directly on the real Python structure -- never
+    round-trips through a serialized/re-parsed form, so there's no way
+    for this step itself to produce something structurally broken."""
     if isinstance(obj, dict):
         return {k: _replace_in_structure(v, replacements) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -155,7 +154,7 @@ def _extract_text(resp):
     for block in resp.content:
         if getattr(block, "type", None) == "text":
             return block.text
-    raise ValueError("no text block found in response content: " + str([type(b) for b in resp.content]))
+    raise ValueError(f"no text block found in response content: {[getattr(b, 'type', type(b)) for b in resp.content]}")
 
 
 def _parse_spans(raw_text):
@@ -183,17 +182,17 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
     characters like an embedded double-quote (") into \\" in that
     serialized text, but the model naturally reproduces the real
     unescaped character when quoting a span back (as does a non-ASCII
-    character like Rs., escaped to a unicode codepoint in json.dumps
-    output by default -- a related, earlier instance of the same class
-    of bug). Either way the substring match silently found nothing and a
-    real confidential incentive figure reached a general-clearance user
+    character like ₹, escaped to \\u20b9 in json.dumps output by
+    default -- a related, earlier instance of the same class of bug).
+    Either way the substring match silently found nothing and a real
+    confidential incentive figure reached a general-clearance user
     untouched. Comparing against actual string field VALUES (via
     _walk_strings/_replace_in_structure) instead of a JSON serialization
     sidesteps the entire escaping-mismatch class of bug structurally,
     not just the two specific instances found so far."""
     restricted = _restricted_tiers(clearance)
     if not restricted:
-        return result
+        return result  # this clearance already sees everything -- nothing to check
 
     strings = [s for s in _walk_strings(result) if s]
     if not strings:
@@ -204,7 +203,6 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
     prompt = _PROMPT.format(restricted_definitions=definitions, content=content_for_model[:_MAX_CHARS])
 
     client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
-
     spans = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -221,7 +219,9 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
         logger.error("redaction check exhausted retries for tool=%s -- failing closed, blocking response", tool_name)
         return _BLOCKED_RESULT
 
-    spans = [s for s in spans if isinstance(s, str) and s and any(s in string_val for string_val in strings)]
+    # Validate each flagged span actually occurs somewhere in the real
+    # content (not hallucinated) before trusting it.
+    spans = [s for s in spans if isinstance(s, str) and s and any(s in field for field in strings)]
     if not spans:
         return result
 

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ingestion.db import dual_write, get_live_conn
 from ingestion.state import sync_since, set_last_synced_at, now_utc
 from ingestion.write_ticket import write_ticket
+from ingestion.inline_tier_classifier import classify_tier
 from ingestion.odoo_fetcher import (
     OdooClient, TASK_FIELDS, m2o_name, strip_html,
     fetch_messages, classify_message, fetch_attachments, _is_retryable,
@@ -183,6 +184,8 @@ def process_tickets(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                 counts["written_items"].append(f"{record['ticket_number']}: {record['subject']}")
                 continue
 
+            tier_context = f"Support ticket subject: {record['subject']}\nDescription (truncated):\n{record['description'] or ''}"
+            record["access_tier"] = classify_tier(tier_context)
             dual_write(write_ticket, **record)
             counts["written"] += 1
             counts["written_items"].append(f"{record['ticket_number']}: {record['subject']}")
