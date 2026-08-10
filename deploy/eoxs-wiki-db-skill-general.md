@@ -5,8 +5,8 @@ systems with different shapes.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, tickets, implementation tasks, invoices, synthesized wiki | 21 purpose-built tools |
-| **eoxs-teams** | EOXS Team Live Odoo, read-only | Raw SQL console (4 tools) |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki | 17 purpose-built tools |
+| **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 
 All EOXS data here is confidential — business correspondence, financials,
 personnel and client records. Treat every name, number, and quote as sensitive.
@@ -32,14 +32,22 @@ wrong.
 
 | Question is about | Go to |
 |---|---|
-| Correspondence, calls, support history, invoices, client background, anything synthesized | **eoxs-db** |
-| CRM, pipeline, prospects, deal stage, or other current EOXS Team Odoo state not in the second brain | **eoxs-teams** |
+| Correspondence, calls, client background, implementation/dev work, anything synthesized | **eoxs-db** |
+| Support tickets, invoices/sales orders, pipeline, CRM, prospects, deal stage | **eoxs-teams** — eoxs-db has none of this anymore (moved out 2026-08) |
 
-Fall through from eoxs-db to eoxs-teams when eoxs-db comes back thin, or when
-the question is explicitly about current live state (pipeline, deal stage,
-CRM) rather than history — eoxs-db has no CRM/prospect data of its own. Say
-which connector answered when it was not eoxs-db — do not blend live SQL
-results into the second brain's voice as if they had been synthesized there.
+**For tickets/invoices/CRM/prospects/sales specifically: eoxs-db has no
+dedicated tools for these at all, but check it anyway first if the question
+could plausibly be answered from correspondence** (e.g. `search_emails`/
+`get_client_profile`) **— then go to `eoxs-teams` regardless, since that's
+the only place the structured record lives.** If both surface something
+relevant, cross-reference and give the fuller picture rather than picking
+one arbitrarily; say which connector each part came from.
+
+Otherwise, fall through from eoxs-db to eoxs-teams when eoxs-db comes back
+thin, or when the question is explicitly about current live state rather
+than history. Say which connector answered when it was not eoxs-db — do not
+blend live SQL results into the second brain's voice as if they had been
+synthesized there.
 
 ---
 
@@ -92,9 +100,8 @@ read-only and cannot do that.
 
 | Data | State |
 |---|---|
-| Emails, tickets, calls | Deep history **plus** live ingestion (2-hour sweep, best-effort webhooks) |
+| Emails, calls | Deep history **plus** live ingestion (2-hour sweep, best-effort webhooks) |
 | Implementation tasks | Live ingestion only — smaller and more recent |
-| Sales orders / invoices | **Frozen snapshot.** Real data, no ongoing fetcher. Caveat any "current balance" answer |
 | Wiki pages | Promoted pages are searchable. A separate pipeline drafts new pages every 6 hours into staging; those do **not** appear in `search_wiki` until promoted |
 
 A meaningful share of wiki pages sit above this connection's clearance, so
@@ -109,7 +116,7 @@ say which you used.
 
 ## 5. Tools
 
-### eoxs-db — 21 tools, all read-only
+### eoxs-db — 17 tools, all read-only
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to
 the matching `get_*`. Never construct or guess a `source_file_path`** —
@@ -132,20 +139,17 @@ has extracted text (check `text_extracted` on the attachment first); a
 `source`: `fireflies` | `fathom` | omit for both. One tool set covers both — use
 the filter, do not call twice.
 
-**Support tickets** — `search_tickets(query)` · `get_ticket(id)`
-
-**Invoices** (frozen snapshot) — `search_invoices(query)` · `get_invoice(id)`
-
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a
 `source_file_path` and looks across tables. Live-ingested rows have no path, so
 it will not find them — use `get_call`/`get_email` with an `id` instead. Rarely
-needed now that `get_client_profile` exists.
+needed now that `get_client_profile` exists. No support-ticket or invoice
+data here anymore — see §1.
 
-**Implementation tasks** (per-client Odoo onboarding/dev Kanban — a *different*
-source from support tickets) — `list_implementation_tasks(client, stage)` ·
+**Implementation tasks** (per-client Odoo onboarding/dev Kanban) —
+`list_implementation_tasks(client, stage)` ·
 `search_implementation_tasks(query, client)` · `get_implementation_task(task_id)`
-`task_id` is an integer, unlike the string identifiers ticket and invoice tools take.
+`task_id` is an integer, unlike the string identifiers other tools take.
 
 ### eoxs-teams — 4 tools, read-only SQL
 
@@ -163,12 +167,13 @@ Every tool call costs seconds of latency, and its full result stays in context
 for the rest of the conversation. Answer in the fewest calls that are genuinely
 sufficient.
 
-1. **`get_client_profile` replaces six searches.** For any "tell me about client
-   X" question it returns the client record, contacts, recent tickets,
-   implementation tasks, emails, calls, sales-order count, and wiki pages (live
-   plus staging pending promotion), cross-linked by `client_id`. Call it **first**
-   and **once**. Never rebuild that picture by chaining `search_emails` +
-   `search_calls` + `search_tickets` + `search_implementation_tasks`.
+1. **`get_client_profile` replaces several searches.** For any "tell me about
+   client X" question it returns the client record, contacts, implementation
+   tasks, emails, calls, and wiki pages (live plus staging pending promotion),
+   cross-linked by `client_id`. Call it **first** and **once**. Never rebuild
+   that picture by chaining `search_emails` + `search_calls` +
+   `search_implementation_tasks`. For that client's tickets/invoices, go to
+   `eoxs-teams` separately — this doesn't cover them (§1).
 2. **Do not re-search what a profile already gave you.** Drill in with a `get_*`
    call on a specific `id` it surfaced.
 3. **On `eoxs-teams`, call `get_business_schema()` first.** One call returns
@@ -206,18 +211,14 @@ has been written.
 meetings are relevant. Try individual accounts only if `all` appears to miss
 something.
 
-**A support issue** → `search_tickets(query)` → `get_ticket(id)`. If the question
-is about onboarding or dev work rather than a support request, use
-`search_implementation_tasks` instead — different board, different source.
-
-**Billing or revenue** → `search_invoices(query)` → `get_invoice(id)`. Always
-caveat as a frozen snapshot, never as current balance.
-
-**Pipeline, CRM, prospects, or current live Odoo state** → `eoxs-teams`:
-`get_business_schema()` then one targeted `query(sql)`. Check eoxs-db first
-only if the question could plausibly be answered from correspondence/history
-instead (e.g. "have we talked to X" → try `search_emails`/`get_client_profile`
-before falling through).
+**A support issue, billing/invoice/revenue question, or anything pipeline/CRM/
+prospect-related** → `eoxs-teams`: `get_business_schema()` then one targeted
+`query(sql)`. eoxs-db has no tools for any of these (§1) — check eoxs-db first
+only if the question could plausibly be answered from correspondence instead
+(`search_emails`/`get_client_profile`), and cross-reference if both surface
+something. If the question is about onboarding/dev work rather than a support
+ticket, that's `search_implementation_tasks` on eoxs-db instead — different
+board, different source, still in this system.
 
 **Open-ended** → `get_index()` if not already called → one targeted search →
 widen only if thin → pull full records for anything load-bearing. Name what you
@@ -239,11 +240,11 @@ These answers are read on phones as often as on desktops. Write for a small scre
   Wide tables are hard to read on a phone.
 - **Cite sources** at the end of every substantive answer, and name the connector
   when it was not eoxs-db.
-- **Never invent** a number, date, name, or invoice reference. Not found means
+- **Never invent** a number, date, name, or reference. Not found means
   not found.
 - **Flag freshness** whenever it changes how much weight the answer carries:
-  invoices frozen, wiki promoted-only, emails/tickets/calls live, eoxs-teams
-  current.
+  wiki promoted-only, emails/calls live, eoxs-teams (including tickets/
+  invoices/CRM, all moved there) current by definition.
 - **Separate record from inference,** and label inferences as such.
 
 ---
