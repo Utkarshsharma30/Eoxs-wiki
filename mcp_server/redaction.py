@@ -136,6 +136,21 @@ _EXTRA_CATEGORY_DEFINITIONS = {
         "quantities/counts of items, percentages that aren't themselves a price, phone "
         "numbers, ids)."
     ),
+    # 2026-08-11: general gains tier2_confidential clearance (see
+    # http_server.py IDENTITIES) so most of that bucket's content -- legal/
+    # compliance included -- is now fine for general to read in full. The one
+    # thing that must stay hidden regardless is Cattr/performance data (HR +
+    # full only, per explicit instruction) -- once general is
+    # tier2_confidential-cleared, the ordinary tier-boundary check no longer
+    # excludes it for them (check_and_redact only checks tiers NOT in the
+    # caller's clearance), so this has to be its own extra_category, applied
+    # unconditionally regardless of tier, same mechanism as monetary_amounts.
+    "employee_activity_monitoring": (
+        "Employee activity, performance, or productivity monitoring data -- e.g. Cattr or "
+        "similar tracking-tool output, individual performance metrics/scores, productivity "
+        "reviews. Applies regardless of which tier the surrounding content belongs to -- flag "
+        "it in ordinary tier2 content the same as tier2_confidential content."
+    ),
 }
 
 _ALL_CATEGORY_DEFINITIONS = {**_TIER_DEFINITIONS, **_EXTRA_CATEGORY_DEFINITIONS}

@@ -28,10 +28,17 @@ no header/param a client could send to widen its own access:
     this URL before handing it out further.
   - MCP_HR_URL_SECRET      -> HR_CLEARANCE (tier2_confidential + tier2,
     not tier1/Raj-personal). For HR and other explicitly-trusted roles.
-  - MCP_GENERAL_URL_SECRET -> GENERAL_CLEARANCE (tier2 only). For any
-    other employee's connector.
-  - MCP_INTERN_URL_SECRET  -> GENERAL_CLEARANCE (same row-level access as
-    general -- deliberately NOT a new access_tier value), plus
+  - MCP_GENERAL_URL_SECRET -> HR_CLEARANCE (tier2_confidential + tier2,
+    not tier1/Raj-personal), plus extra_redact_categories=
+    ("monetary_amounts", "employee_activity_monitoring"): every dollar
+    figure gets stripped (including payroll -- unlike HR, no carve-out)
+    and Cattr/performance-monitoring content stays HR+full-only regardless
+    of the wider tier clearance. 2026-08-11: widened from tier2-only,
+    since most tier2_confidential pages carry a dollar figure alongside
+    otherwise-relevant general content that general shouldn't lose over
+    one number -- see redaction.py for the category definitions.
+  - MCP_INTERN_URL_SECRET  -> GENERAL_CLEARANCE (tier2 only -- unlike
+    general above, intern was NOT widened to tier2_confidential), plus
     extra_redact_categories=("monetary_amounts",): every tool response
     also gets checked for dollar figures/prices/totals/deal sizes and has
     them stripped, on top of the normal tier2-only filtering. For interns
@@ -73,7 +80,16 @@ MOUNT_PREFIX = "/mcp"
 IDENTITIES = [
     ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, ()),
     ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",)),
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], GENERAL_CLEARANCE, ()),
+    # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
+    # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
+    # dollar figure alongside otherwise-relevant general content, and general
+    # was losing the whole page over one number. Same URL/secret as before,
+    # so nothing breaks for anyone who already has this link -- it now just
+    # returns more, redacted content. monetary_amounts blocks every dollar
+    # figure (including payroll -- unlike hr's non_payroll_monetary_amounts
+    # carve-out); employee_activity_monitoring keeps Cattr/performance data
+    # HR+full-only regardless of the wider tier clearance (see redaction.py).
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring")),
     ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",)),
 ]
 
