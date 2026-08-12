@@ -90,6 +90,16 @@ def _load_connect_token(token):
         conn.close()
 
 
+def _store_code_verifier(token, code_verifier):
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE oauth_connect_tokens SET code_verifier = %s WHERE token = %s", (code_verifier, token))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _mark_token_used(token):
     conn = get_live_conn()
     try:
@@ -137,6 +147,12 @@ async def gmail_connect(token: str):
     # person has authorized this app before -- without it, a repeat consent
     # can come back with an access_token only, and we'd store nothing.
     auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=token)
+    # PKCE: authorization_url() just generated flow.code_verifier (used to
+    # derive the code_challenge baked into auth_url). /callback runs as a
+    # separate request with its own throwaway Flow object, so this has to be
+    # persisted against the token now or the token exchange fails with
+    # "Missing code verifier" -- see schema/028_oauth_pkce_verifier.sql.
+    _store_code_verifier(token, flow.code_verifier)
     return RedirectResponse(auth_url)
 
 
@@ -151,7 +167,9 @@ async def gmail_callback(request: Request, code: str | None = None, state: str |
     if row is None or row["used_at"] is not None or row["expires_at"] < now_utc():
         raise HTTPException(status_code=410, detail="This invite link is no longer valid -- ask for a new one")
 
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=_redirect_uri())
+    flow = Flow.from_client_config(
+        _client_config(), scopes=SCOPES, redirect_uri=_redirect_uri(), code_verifier=row["code_verifier"]
+    )
     flow.fetch_token(code=code)
     refresh_token = flow.credentials.refresh_token
     if not refresh_token:
