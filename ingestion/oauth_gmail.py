@@ -32,13 +32,20 @@ router = APIRouter()
 
 
 def _client_config():
-    """One shared OAuth app across every connected Gmail account -- same
-    client_id/secret raj_gmail/ron_gmail/remya_gmail already used, just
-    under a source-neutral env var name instead of RAJ_GMAIL_*."""
+    """A separate "Web application"-type Google OAuth client, distinct
+    from GMAIL_OAUTH_CLIENT_ID/SECRET (the original "Desktop app"-type
+    client raj_gmail/ron_gmail/remya_gmail were connected with). Google
+    only allows a custom HTTPS redirect_uri on a Web application client --
+    Desktop clients are restricted to localhost/the deprecated OOB
+    copy-paste flow, so this connect/callback exchange cannot reuse the
+    old client no matter how convenient that would be. Every account
+    connected through this flow (Isha onward) is bound to THIS client for
+    future token refreshes too -- see client_type in oauth_accounts and
+    gmail_fetcher.py's _load_account_credentials()."""
     return {
         "web": {
-            "client_id": os.environ["GMAIL_OAUTH_CLIENT_ID"],
-            "client_secret": os.environ["GMAIL_OAUTH_CLIENT_SECRET"],
+            "client_id": os.environ["GMAIL_OAUTH_WEB_CLIENT_ID"],
+            "client_secret": os.environ["GMAIL_OAUTH_WEB_CLIENT_SECRET"],
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
         }
@@ -99,11 +106,12 @@ def _upsert_account(account_label, display_name, source_type, refresh_token, con
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO oauth_accounts (account_label, display_name, source_type, refresh_token, connected_by)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO oauth_accounts (account_label, display_name, source_type, refresh_token, client_type, connected_by)
+                VALUES (%s, %s, %s, %s, 'web', %s)
                 ON CONFLICT (account_label) DO UPDATE SET
                     refresh_token = EXCLUDED.refresh_token,
                     status = 'active',
+                    client_type = 'web',
                     connected_at = now(),
                     connected_by = EXCLUDED.connected_by
                 """,

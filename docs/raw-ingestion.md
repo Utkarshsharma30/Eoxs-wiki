@@ -44,16 +44,32 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
 - **Auth**: accounts live in the `oauth_accounts` table (schema/026_oauth_accounts.sql), not hardcoded
   `.env` triplets — `load_accounts(raw_sweep_only=False)` returns `{account_label: display_name}` for
   every `status='active'` row, `raw_sweep_only=True` additionally filters to `raw_sweep_enabled=true`
-  (what the recurring sweep iterates). `client_id`/`client_secret` are still shared across every
-  account (`GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET` in `.env`, one OAuth app); only
-  `refresh_token` is per-account and lives in the DB row.
+  (what the recurring sweep iterates). Only `refresh_token` is per-account and lives in the DB row.
+- **Two OAuth clients, not one** (`oauth_accounts.client_type`, schema/027_oauth_client_type.sql):
+  `raj_gmail`/`ron_gmail`/`remya_gmail` (`client_type='legacy_desktop'`) refresh against
+  `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET` — a Google "Desktop app"-type client, which
+  cannot register a custom redirect_uri at all (Google restricts it to localhost/the deprecated OOB
+  copy-paste flow). Every account connected through the self-serve flow below
+  (`client_type='web'`) refreshes against `GMAIL_OAUTH_WEB_CLIENT_ID`/`GMAIL_OAUTH_WEB_CLIENT_SECRET`
+  instead — a separate "Web application"-type client in the same Google Cloud project (same consent
+  screen, same verification status), the only type Google allows a custom HTTPS redirect_uri on.
+  `gmail_fetcher.py`'s `_load_account_credentials()` picks the right pair per account automatically;
+  refreshing an already-issued token never re-validates redirect_uri, so this split is invisible to
+  the 3 existing accounts.
 - **Connecting a new account**: `ingestion/oauth_gmail.py` — `python -m ingestion.oauth_gmail invite
   <account_label> <display_name>` mints a single-use, expiring link (`oauth_connect_tokens` table).
   The account owner opens it, logs into Google directly (never sees our system, never types a
   password into anything we control), approves `gmail.readonly` access. Google redirects to
   `/oauth/gmail/callback` (mounted in `ingestion/server.py`), which exchanges the code for a refresh
   token server-side and upserts the `oauth_accounts` row — no `.env` edit, no service restart. The
-  account is picked up by the very next sweep automatically. Current accounts: `raj_gmail`, `ron_gmail`
+  account is picked up by the very next sweep automatically. The redirect_uri is
+  `https://5-223-44-95.nip.io/oauth/gmail/callback` (`OAUTH_REDIRECT_BASE_URL` in `.env`) —
+  nip.io's wildcard DNS (`<ip>.nip.io` always resolves to `<ip>`, zero setup) stands in for a real
+  domain, since Google rejects a raw IP literal as a Web-application client's redirect_uri ("must end
+  with a public top-level domain"); see the `deploy/nginx-https.conf` server block for this hostname,
+  with its own standard 90-day Let's Encrypt cert (separate from the ~6-day IP-address cert the bare-IP
+  block uses). Swap this for a real subdomain once one exists (`docs/infrastructure-roadmap.md`).
+  Current accounts: `raj_gmail`, `ron_gmail`
   (both `raw_sweep_enabled=true`), `remya_gmail` (`raw_sweep_enabled=false` — 2026-08-10, one-time
   historical pull only, not an ongoing source).
 - **Entry point**: `process_account(account, *, dry_run, limit, safety_overlap_days, classify)`.

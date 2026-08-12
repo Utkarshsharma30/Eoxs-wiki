@@ -64,12 +64,20 @@ def load_accounts(raw_sweep_only=False):
         conn.close()
 
 
-def _load_refresh_token(account):
+def _load_account_credentials(account):
+    """Returns (refresh_token, client_id, client_secret). client_type picks
+    which OAuth client's id/secret to refresh with -- a refresh_token is
+    bound to whichever client originally minted it (see
+    schema/027_oauth_client_type.sql): 'legacy_desktop' for raj/ron/remya
+    (the original Desktop-type client, refresh_token predates this DB
+    table), 'web' for every account connected via oauth_gmail.py's
+    self-serve flow (a Google "Web application" client -- required for a
+    custom HTTPS redirect_uri, which Desktop clients cannot register)."""
     conn = get_live_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT refresh_token FROM oauth_accounts WHERE account_label = %s AND source_type = 'gmail' AND status = 'active'",
+                "SELECT refresh_token, client_type FROM oauth_accounts WHERE account_label = %s AND source_type = 'gmail' AND status = 'active'",
                 (account,),
             )
             row = cur.fetchone()
@@ -77,7 +85,13 @@ def _load_refresh_token(account):
         conn.close()
     if row is None:
         raise ValueError(f"no active oauth_accounts row for {account!r} -- connect it first (ingestion/oauth_gmail.py)")
-    return row["refresh_token"]
+    if row["client_type"] == "legacy_desktop":
+        client_id = os.environ["GMAIL_OAUTH_CLIENT_ID"]
+        client_secret = os.environ["GMAIL_OAUTH_CLIENT_SECRET"]
+    else:
+        client_id = os.environ["GMAIL_OAUTH_WEB_CLIENT_ID"]
+        client_secret = os.environ["GMAIL_OAUTH_WEB_CLIENT_SECRET"]
+    return row["refresh_token"], client_id, client_secret
 
 
 GMAIL_NUM_RETRIES = 8
@@ -109,11 +123,12 @@ def _retry_after(e):
 
 
 def get_gmail_service(account):
+    refresh_token, client_id, client_secret = _load_account_credentials(account)
     creds = Credentials(
         None,
-        refresh_token=_load_refresh_token(account),
-        client_id=os.environ["GMAIL_OAUTH_CLIENT_ID"],
-        client_secret=os.environ["GMAIL_OAUTH_CLIENT_SECRET"],
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
         token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
     )
