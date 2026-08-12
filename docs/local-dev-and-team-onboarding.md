@@ -161,6 +161,61 @@ You now have a full local checkout, talking to a live-updating copy of the
 real data (staging gets every ingestion cycle the same as live does), with no
 path to touching production from your laptop at all.
 
+### Troubleshooting — real mistakes hit doing this setup, in order
+
+Every one of these actually happened working through this guide. Saving the
+next person the same back-and-forth.
+
+- **"Which terminal am I actually in?"** — the single most common mistake
+  here, by far. Windows PowerShell, WSL's Ubuntu app, and an SSH session on
+  the server are three genuinely different environments that can look
+  similar at a glance. Before running anything, check the prompt: it should
+  show your laptop's own hostname (e.g. `...@LAPTOP-XXXX`) for local WSL
+  work, or the server's hostname (`...@ubuntu-4gb-sin-1`) if you're
+  intentionally inside an SSH session. Commands meant for one, run in the
+  other, fail in confusing ways (see the tunnel note below) rather than with
+  an obvious "wrong place" error.
+- **`sudo apt install python3.12` fails with "Unable to locate package"** —
+  WSL's default Ubuntu (22.04 "jammy") doesn't carry Python 3.12 in its base
+  repos. Fix: add the deadsnakes PPA first —
+  `sudo apt install -y software-properties-common && sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update`
+  — then retry the full install line from step 2. If any package name in a
+  multi-package `apt install` can't be found, apt aborts the whole command
+  without installing *any* of them — re-run the complete line, not just the
+  failed package.
+- **`git clone`/`git push` prompts for credentials, or fails outright** —
+  this repo is private. Generate a GitHub personal access token scoped to
+  it and use that as the password when prompted (username = your GitHub
+  username). **Never paste a real token into a chat with an AI assistant or
+  anywhere else it'll be logged** — if one ever does end up somewhere it
+  shouldn't, rotate/revoke it immediately afterward, even if it worked fine.
+- **`pip install -r requirements.txt` fails with "No such file or
+  directory"**, or `nano .env` opens a suspiciously empty "[New File]"** —
+  you're not inside the cloned repo directory. `cd` into it first
+  (`ls` should show `requirements.txt`, `mcp_server/`, `ingestion/`, etc.
+  before you proceed) — this is the same "which terminal/directory am I in"
+  class of mistake as the first point above, just one level more specific.
+- **The verify step fails with `Connection refused` on port 5433** — the SSH
+  tunnel (step 5) isn't currently open. It has to run in its own dedicated
+  terminal window, stays silent with no prompt while working correctly, and
+  does **not** persist once that window is closed — reopen it
+  (`ssh -L 5433:127.0.0.1:5432 deploy@5.223.44.95 -N`, from your laptop, not
+  from inside a server session) any time you come back to this after a break.
+- **Pasting the multi-line `GRANT`/`ALTER` block right after `\c
+  eoxs_wiki_staging` produces `invalid integer value "..." for connection
+  option "port"`** — psql's `\c` command consumes everything up to the next
+  newline as connection arguments, and a fast multi-line paste can deliver
+  the next SQL line before `\c` finishes parsing, so it tries to parse
+  `GRANT ALL PRIVILEGES...` as a username/host/port. Run `\c
+  eoxs_wiki_staging` **by itself**, confirm the prompt actually changes to
+  `eoxs_wiki_staging=#`, *then* paste the rest as a separate block.
+- **A private access token/password only works for read, not push (or vice
+  versa), even though it worked a minute ago for something else** —
+  fine-grained GitHub tokens are scoped to an explicit list of repositories.
+  A token that already works fine against `eoxs-wiki-db` won't automatically
+  work against a brand-new repo until that repo is added to the token's own
+  "Repository access" list in GitHub settings.
+
 ---
 
 ## Part 2 — Day-to-day workflow

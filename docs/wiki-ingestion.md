@@ -101,7 +101,7 @@ claude -p "<prompt>" \
 
 ### 3.1 What each sub-agent's tools actually are
 
-- **Phase 3** (`agent_mcp_server.build_agent_server(cycle_id, source_kind)`): all read tools from the main `mcp_server` (search_tickets, get_ticket, search_emails, etc.) plus write tools scoped only to `wiki_staging`: `search_wiki_inventory`, `get_live_wiki_page`, `create_staging_page`, `update_staging_page`, `add_staging_link`, `add_staging_citation`, `add_staging_flag`. `cycle_id`/`source_kind` are factory arguments closed over when the server is built (one fresh instance per SSE connection, keyed by the URL's `/wiki-agent/{cycle_id}/{source_kind}/sse` path) — never something the model's own tool arguments could fabricate or override.
+- **Phase 3** (`agent_mcp_server.build_agent_server(cycle_id, source_kind)`): all read tools from the main `mcp_server` (`search_emails`, `get_email`, `search_calls`, `get_implementation_task`, etc. — the current 17-tool set, see `docs/backend-server.md` §5; `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` no longer exist here either, removed 2026-08-10 along with the rest of the tool surface) plus write tools scoped only to `wiki_staging`: `search_wiki_inventory`, `get_live_wiki_page`, `create_staging_page`, `update_staging_page`, `add_staging_link`, `add_staging_citation`, `add_staging_flag`. `cycle_id`/`source_kind` are factory arguments closed over when the server is built (one fresh instance per SSE connection, keyed by the URL's `/wiki-agent/{cycle_id}/{source_kind}/sse` path) — never something the model's own tool arguments could fabricate or override.
 - **Phase 4** (`consolidate_mcp_server.build_consolidate_server()`): read tools + `get_staging_page`, `merge_staging_pages`. No per-connection scoping needed — every tool takes explicit ids.
 - **Phase 5** (`review_mcp_server.build_review_server()`): read tools + `get_staging_page`, `mark_reviewed`, `mark_rejected`. **No promotion tool exists here at all**, by design — review can approve/reject, but never publish.
 
@@ -146,11 +146,11 @@ A **separate** classifier, `tier_classifier.py`, exists purely for the ~1,046 le
 
 `deploy/eoxs-wiki-pipeline.timer`: `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours. `deploy/eoxs-wiki-pipeline.service` sets `TimeoutStartSec=infinity` deliberately (a single batch can take 3–5+ minutes, a full run can span hours — systemd's default ~90s oneshot timeout would otherwise kill it mid-run). It now depends on `deploy/eoxs-wiki-mcp.service` (`After=`/`Wants=`) — the persistent HTTP MCP server every sub-agent invocation connects to (see §3, §6) must be up first. `eoxs-wiki-mcp.service` is `Restart=always`, matching `eoxs-mcp.service`'s pattern for the external connector.
 
-## 8. Current real pipeline state
+## 8. Current real pipeline state (as of 2026-08-12)
 
-`wiki_staging.wiki_pages` status counts: **4 draft**, **210 reviewed**, **13 rejected**, **2 promoted** (229 total). Live `wiki_pages`: **1,048** total (27 tier1 / 714 tier2_confidential / 307 tier2). Only 2 pages have ever been promoted relative to 210 sitting in `reviewed` — promotion is genuinely rare/manual relative to how much reaches review-approved status, which is expected given it's a deliberate human checkpoint, not a bottleneck to "fix."
+`wiki_staging.wiki_pages` status counts: **0 draft**, **0 reviewed**, **21 rejected**, **404 promoted** (425 total). Live `wiki_pages`: **1,348** total (39 tier1 / 753 tier2_confidential / 556 tier2). `wiki_ingest_cycles` has reached **39** total cycles.
 
-Recent `wiki_ingest_cycles`: cycles 9–12, 14–18 all `status='done'`; cycle 13 `status='failed'` (an interruption unrelated to the review bug above — its `raj_gmail` batch is the direct source of the 4 stuck drafts in §6).
+This is a substantial change from an earlier snapshot of this document, which recorded only 2 pages ever promoted against 210 sitting in `reviewed` — a large backlog that had been silently stuck (traced to an unpopped `git stash` from 2026-08-04 that had, among other things, removed `promote.py` from the working tree entirely). Once recovered and re-run, the full `reviewed` backlog cleared in one pass with zero failures — the pipeline itself was always healthy; the promotion step just wasn't reachable for several days. Current state reflects a fully caught-up system, not an unusually quiet one.
 
 ## 9. Linear reporting hook
 

@@ -95,6 +95,12 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
 
 Two clients in the `clients` table (`rw-conklin-steel`, `brannon-steel`) have **no** Odoo instance configured (`odoo_base_url`/`odoo_db` both NULL) — no implementation-task ingestion is possible for them; they only appear via other sources (email, calls).
 
+### EOXS Support Tickets & Invoices — removed from Cruz's MCP tool surface, but not fully from ingestion (2026-08-10)
+
+Support tickets and invoices/sales-orders were deliberately removed from this system — `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` no longer exist as MCP tools (see `docs/backend-server.md` §5), and every historical row in `tickets`/`sales_orders`/`invoices` (and their child tables) was deleted. That data now lives exclusively in the separate `eoxs-teams` Odoo connector.
+
+**Known, unresolved bug**: the removal only reached the MCP tool surface and (for implementation tasks specifically) `run_full_sweep()`'s per-client odoo source list — it never reached `tickets_fetcher.py`/`invoice_fetcher.py`'s own registration in the recurring sweep. Confirmed live: the `tickets` table is not zero and is actively growing again (2 rows shortly after the deletion, 14 rows a few hours later) — the sweep is still calling `tickets_fetcher.py` and writing new rows nobody can query through any Cruz tool anymore. `invoice_fetcher.py`, by contrast, does appear to have actually stopped (`sales_orders`/`invoices` remain at 0). This asymmetry is unexplained and the fix (removing `tickets_fetcher.py`'s call from wherever the sweep still invokes it — see `ingestion/server.py`'s sweep implementation) has not yet been done.
+
 ### EOXS Support Tickets (`tickets_fetcher.py`) — central Odoo instance
 
 - **API**: same Odoo XML-RPC mechanism, but a **separate, central** instance — `BASE_URL = "https://teams.eoxs.com"`, `DB = "Eoxteams_12Feb24"` — filtered to a single project, `project.task` where `project_id = 76` ("EOXS Support"). This is explicitly **not** one of the 6 per-client instances above.
@@ -209,30 +215,31 @@ The actual production 2-hourly sweep runs via `python -m ingestion.server --swee
 
 `ingest_log(id, log_date, operation, description, raw_entry)`, written exclusively by `ingestion/ingest_log.py`'s `log_run(trigger_source, result)`, called after every webhook or sweep completes. Handles both a single fetcher's result shape and the full sweep's multi-source shape. **Never raises** — a logging failure must never mask an otherwise-successful ingestion run. Dual-written like everything else. This is the complete, granular record of every trigger, webhook or sweep — distinct from Linear reporting, which only fires for full sweeps (see `docs/linear-integration.md`).
 
-## 11. Real current row counts (live `eoxs_wiki`)
+## 11. Real current row counts (live `eoxs_wiki`, as of 2026-08-12)
 
 | Table | Rows |
 |---|---|
-| email_threads | 30,384 |
-| email_messages | 59,151 |
-| email_attachments | 20,198 |
-| call_transcripts | 2,383 |
-| call_segments | 178,303 |
-| tickets | 1,952 |
-| ticket_events | 462 |
-| ticket_attachments | 373 |
-| implementation_tasks | 827 |
-| implementation_task_events | 5,610 |
-| implementation_task_attachments | 685 |
-| sales_orders | 185 |
-| order_lines | 693 |
-| sales_order_events | 544 |
-| invoices | 152 |
-| invoice_lines | 412 |
+| email_threads | 30,489 |
+| email_messages | 59,728 |
+| email_attachments | 20,578 |
+| call_transcripts | 2,387 |
+| call_segments | 179,058 |
+| tickets | 14 (still growing — §12, known bug) |
+| ticket_events | 104 |
+| ticket_attachments | 1 |
+| implementation_tasks | 828 |
+| implementation_task_events | 5,613 |
+| implementation_task_attachments | 686 |
+| sales_orders | 0 |
+| order_lines | 0 |
+| sales_order_events | 0 |
+| invoices | 0 |
+| invoice_lines | 0 |
 | clients | 8 |
 | contacts | 56 |
 
-## 12. Two things worth flagging to a new developer
+## 12. Three things worth flagging to a new developer
 
 1. **The `--limit` + cursor-advance interaction (§5)** — a real gap. Don't do manual backlog catch-ups with `--limit` without either accepting the gap or resetting the cursor first.
 2. **Two Odoo "worlds" that must not be confused**: 6 **per-client** implementation-board instances (`odoo_fetcher.py`, one Odoo tenant per client) vs. 1 **central** `teams.eoxs.com` instance shared by tickets and invoices (`tickets_fetcher.py`/`invoice_fetcher.py`) — same underlying Odoo models, completely different databases/credentials/routing logic. `ingestion/_check_env.py` (the project's own env-var-completeness diagnostic) is also a bit stale in places (see the Linear key-name note in `docs/linear-integration.md`) — when in doubt about which env var a given piece of code actually reads, grep the fetcher itself rather than trusting the diagnostic script.
+3. **`tickets_fetcher.py` is still live in the recurring sweep despite tickets being removed from Cruz's tool surface (§2 above)** — a real, unresolved bug, not a documentation lag. If you're touching sweep code, this is the next thing that should get fixed: find and remove `tickets_fetcher.py`'s call from `ingestion/server.py`'s sweep path, matching what already correctly happened to `invoice_fetcher.py` and the per-client odoo/implementation-task source.

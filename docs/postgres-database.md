@@ -32,20 +32,24 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 020 | `020_tier2_confidential.sql` | Adds `'tier2_confidential'` to the enum — redesigns 2 tiers into today's 3. |
 | 021 | `021_wiki_board_state.sql` | `wiki_ingest_board_state` — tracks persistent Linear "board" issue IDs. |
 | 022 | `022_invoices_live.sql` | Makes invoice-related columns nullable for live-only orders; adds `sales_order_events`, `invoices`, `invoice_lines`. |
+| 023 | `023_mcp_redaction_log.sql` | `mcp_redaction_log` — audit trail for every time the MCP server's query-time redaction safety net actually strips content (see `docs/backend-server.md` §5). |
+| 024 | `024_email_attachment_extraction.sql` | Adds `source_attachment_id`, `mimetype`, `extracted_text` to `email_attachments` — closes the gap where attachment content was structurally invisible to every MCP tool. |
 
 ## 2. Every table, grouped logically
 
-**35 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**36 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
 - **Reference:** `clients`, `contacts`
 - **Emails:** `email_threads`, `email_messages`, `email_attachments`
 - **Wiki (live):** `wiki_pages`, `wiki_links`, `wiki_citations`, `wiki_flags`
-- **Tickets:** `tickets`, `ticket_events`, `ticket_attachments`
-- **Sales/Invoices:** `sales_orders`, `order_lines`, `sales_order_events`, `invoices`, `invoice_lines`
+- **Tickets:** `tickets`, `ticket_events`, `ticket_attachments` — **no longer reachable via any MCP tool** (removed 2026-08-10, historical rows deleted); the tables still exist because a known bug in the recurring sweep still writes new rows to `tickets`/`ticket_events` — see `docs/raw-ingestion.md` §12.
+- **Sales/Invoices:** `sales_orders`, `order_lines`, `sales_order_events`, `invoices`, `invoice_lines` — same MCP-tool removal as tickets; currently empty (0 rows) and, unlike tickets, not being repopulated.
 - **Calls:** `call_transcripts`, `call_segments`
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
-- **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`
+- **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
+
+A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
 
 ## 3. Full column structure
 
@@ -78,7 +82,8 @@ email_messages: id serial PK, thread_id int NOT NULL FK->email_threads,
 
 email_attachments: id serial PK, thread_id int NOT NULL FK->email_threads,
   message_id int FK->email_messages, filename text NOT NULL, relative_path text NULL,
-  size_bytes bigint, note text
+  size_bytes bigint, note text, source_attachment_id text NULL, mimetype text NULL,
+  extracted_text text NULL
 
 wiki_pages: id serial PK, title text NOT NULL, page_type wiki_page_type NOT NULL,
   entity_class text, tags text[], sources_raw text[], created_date/updated_date date,
@@ -189,6 +194,11 @@ wiki_ingest_board_state: board_key text PK, linear_issue_id text NOT NULL,
   linear_issue_identifier text NOT NULL, updated_at timestamptz
   -- ONE row today: board_key='pending_drafts'
 
+mcp_redaction_log: id serial PK, occurred_at timestamptz NOT NULL DEFAULT now(),
+  clearance_name text NOT NULL ('hr' | 'general' -- never 'full', that identity skips
+  the redaction check entirely), tool_name text NOT NULL,
+  redacted_snippets text[] NOT NULL -- the exact spans that were removed
+
 wiki_staging.wiki_pages: id serial PK, live_page_id int NULL (informal, no FK — points at
   public.wiki_pages.id once promoted), title text NOT NULL, page_type wiki_page_type NOT NULL,
   entity_class text, tags/sources_raw text[], body text NOT NULL, source_kind text NOT NULL,
@@ -223,59 +233,46 @@ Only two exist, identically in both databases: `plpgsql` (bundled default) and `
 
 No other application-relevant roles exist (the rest are Postgres 16's built-in `pg_*` predefined roles, unused here).
 
-## 7. Real current row counts (live `eoxs_wiki`)
+## 7. Real current row counts (live `eoxs_wiki`, as of 2026-08-12)
 
 | Table | Rows |
 |---|---|
-| call_segments | 178,303 |
-| email_messages | 59,151 |
-| email_threads | 30,384 |
-| db_sync_state | 34,762 |
-| wiki_ingest_seen | 31,252 |
-| email_attachments | 20,198 |
-| wiki_links | 14,180 |
-| tickets | 1,952 |
-| call_transcripts | 2,383 |
-| wiki_pages | 1,048 |
-| implementation_tasks | 827 |
-| wiki_citations | 1,144 |
-| wiki_flags | 738 |
-| implementation_task_events | 5,610 |
-| sales_orders | 185 |
-| order_lines | 693 |
-| sales_order_events | 544 |
-| invoices | 152 |
-| invoice_lines | 412 |
-| ticket_events | 462 |
-| ticket_attachments | 373 |
-| implementation_task_attachments | 685 |
-| message_ids_seen | 3,582 |
+| call_segments | 179,058 |
+| email_messages | 59,728 |
+| email_threads | 30,489 |
+| email_attachments | 20,578 |
+| wiki_links | 13,628 |
+| call_transcripts | 2,387 |
+| wiki_pages | 1,348 |
+| implementation_tasks | 828 |
+| wiki_citations | 2,196 |
+| wiki_flags | 1,064 |
+| implementation_task_events | 5,613 |
+| implementation_task_attachments | 686 |
+| mcp_redaction_log | 335 |
+| ticket_events | 104 |
+| tickets | 14 |
+| ticket_attachments | 1 |
+| sales_orders | 0 |
+| order_lines | 0 |
+| sales_order_events | 0 |
+| invoices | 0 |
+| invoice_lines | 0 |
 | clients | 8 |
 | contacts | 56 |
 | sync_cursors | 28 |
-| ingest_log | 35 |
-| schema_migrations | 22 |
-| wiki_ingest_cycles | 12 |
-| wiki_ingest_batches | 90 |
+| ingest_log | 117 |
+| schema_migrations | 24 |
+| wiki_ingest_cycles | 39 |
+| wiki_ingest_batches | 190 |
 | wiki_ingest_board_state | 1 |
-| wiki_staging.wiki_pages | 229 |
-| wiki_staging.wiki_citations | 895 |
-| wiki_staging.wiki_links | 374 |
-| wiki_staging.wiki_flags | 253 |
+| wiki_staging.wiki_pages | 425 |
 
-**`access_tier` breakdown (live):**
+`tickets`/`ticket_events` are **not zero and not static** — 14 rows now, up from 2 a few hours prior at the time of writing, direct live evidence of the known lingering sweep bug (`docs/raw-ingestion.md` §12): the MCP-tool-surface removal and the historical-row deletion both happened, but the recurring sweep's `tickets_fetcher.py` invocation was never actually removed, so it keeps writing new rows nobody can query through Cruz anymore. `sales_orders`/`invoices` show the fully-removed, non-regrowing state — the fix that worked for one didn't get applied to the other.
 
-| Table | tier1 | tier2_confidential | tier2 |
-|---|---|---|---|
-| email_threads | 1,449 | 5,753 | 23,182 |
-| call_transcripts | 36 | 345 | 2,002 |
-| tickets | 3 | 171 | 1,778 |
-| implementation_tasks | 0 | 74 | 753 |
-| sales_orders | 0 | 0 | 185 |
-| wiki_pages | 27 | 714 | 307 |
-| wiki_staging.wiki_pages | 229 | 0 | 0 |
+**`access_tier` breakdown, `wiki_pages` (live):** 39 tier1 / 753 tier2_confidential / 556 tier2.
 
-The wiki_staging drafts all show `tier1` because that's the column default and drafts get their real tier computed only at promotion time (see `docs/wiki-ingestion.md` §5) — not a bug.
+**`wiki_staging.wiki_pages` status (425 total):** 21 rejected, 404 promoted, 0 draft, 0 reviewed — the multi-hundred-page promotion backlog documented as a known issue in earlier snapshots of this system has since been fully cleared; see `docs/wiki-ingestion.md` §8.
 
 ## 8. Staging database (`eoxs_wiki_staging`)
 
@@ -289,7 +286,7 @@ Table structure is **exactly identical** to live (same 2 schemas, same extension
 
 **`access_tier` values differ meaningfully between live and staging** — staging still mostly shows the raw column *defaults* (e.g. `email_threads` in staging: 30,333 tier1 / 10 tier2_confidential / 41 tier2, vs. live's 1,449/5,753/23,182 split). This is because the tier-classification backfill (`ingestion/tier_classifier.py`) has only ever been run against live — this is expected current-state drift, not a dual-write bug (classification is a separate batch job, not part of the write path itself).
 
-Database sizes: `eoxs_wiki` ≈ 328 MB, `eoxs_wiki_staging` ≈ 308 MB.
+Database sizes (as of 2026-08-11): `eoxs_wiki` ≈ 525 MB, `eoxs_wiki_staging` ≈ 336 MB. No automated backup of either database exists yet — see the DigitalOcean migration roadmap and the infrastructure punch list for the plan to close this gap (either a scheduled `pg_dump` to object storage, or migrating to a managed Postgres service with automated backups built in).
 
 ## 9. `wiki_staging` — the schema, not to be confused with the database
 

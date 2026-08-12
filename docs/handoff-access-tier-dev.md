@@ -1,5 +1,11 @@
 # Handoff Packet — Chunk-Level Access Tier Feature
 
+> **SUPERSEDED.** Written for a specific one-off feature handoff before this repo was on
+> GitHub — the §3 "no GitHub" premise is no longer true, and the general pattern here
+> (staging-only Postgres role + restricted SSH login) has been generalized into
+> `docs/local-dev-and-team-onboarding.md`, which is what a new developer should actually
+> follow today. This file is kept for the feature-specific context, not as a setup guide.
+
 *For: whoever is picking up the paragraph/section-level access-tier redesign. Prepared so they can get fully independent, working, staging-only access with zero prior context on this project.*
 
 ## The principle this is built on

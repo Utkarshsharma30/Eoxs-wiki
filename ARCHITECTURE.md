@@ -6,7 +6,7 @@
 
 ## 1. What is Cruz, in one paragraph?
 
-Cruz is EOXS's internal "second brain." It automatically collects everything that happens across the company — every email, every sales call, every support ticket, every client implementation update, every invoice — and turns it into a searchable knowledge base that anyone can ask questions of, in plain English, through a chat interface. Different people see different amounts of detail depending on who they are: general staff see general information, HR sees HR-relevant information, and Raj sees everything, including anything personal to him. Everything described in this document is real, built, and running today — not a proposal or a roadmap.
+Cruz is EOXS's internal "second brain." It automatically collects everything that happens across the company — every email, every sales call, every client implementation update — and turns it into a searchable knowledge base that anyone can ask questions of, in plain English, through a chat interface. Different people see different amounts of detail depending on how they connect: general staff see general company information (with financial amounts and employee-monitoring data automatically stripped out), HR additionally sees confidential company matters like legal/investor topics (with payroll visible but every other dollar figure stripped), interns get the general view with all amounts stripped, and Raj's own connection sees everything, including anything personal to him. Support tickets and invoices/sales-orders are no longer part of Cruz at all — that data now lives exclusively in EOXS's own live Odoo system, reachable through a separate connector. Everything described in this document is real, built, and running today — not a proposal or a roadmap.
 
 ## 2. Why does it exist?
 
@@ -17,7 +17,7 @@ Institutional knowledge at a growing company tends to live in people's heads, in
 Think of any single fact — say, a client mentions a pricing concern on a sales call — and follow it through the system:
 
 **Stage 1 — It gets collected automatically.**
-Cruz is connected to nine live sources: three individual Gmail inboxes, one shared support inbox (Zoho), two call-recording tools (Fireflies and Fathom), EOXS's own internal support-ticket system, EOXS's own sales-order and invoicing records, and the implementation/onboarding tracking boards of eight different steel-industry clients. Every one of these is checked automatically — some the moment something new happens (real-time), and all of them again on a fixed 2-hour safety-net schedule, so nothing is ever missed for long.
+Cruz is connected to live sources: three individual Gmail inboxes, one shared support inbox (Zoho), two call-recording tools (Fireflies and Fathom), and the implementation/onboarding tracking boards of several steel-industry clients. Every one of these is checked automatically — some the moment something new happens (real-time), and all of them again on a fixed 2-hour safety-net schedule, so nothing is ever missed for long. (Support tickets and invoices/sales-orders used to be collected here too; that data was deliberately removed from Cruz and now lives only in EOXS's live Odoo system.)
 
 **Stage 2 — It gets filtered and labeled for sensitivity.**
 Before anything is stored for real, a first AI pass throws out pure noise — marketing emails, spam, empty or irrelevant call recordings — while keeping every piece of real business content. A second AI pass then reads the actual content and decides how sensitive it is, sorting it into one of three levels: general company information, company-confidential information (like salary or financial details), or Raj's own personal information. This system is deliberately cautious: if it's ever unsure, it defaults to the *more* restrictive label, not the less restrictive one — better to over-protect than to accidentally expose something sensitive.
@@ -33,15 +33,24 @@ Once live, that knowledge is exactly what Cruz's chat interface searches through
 
 Alongside all of this, a separate tracking board (in Linear, a project-management tool) automatically gets a running log of what the automation is doing every step of the way — so progress can be checked at a glance without anyone needing direct database access.
 
-## 4. The three levels of access, explained simply
+## 4. Access levels, explained simply
 
-Cruz doesn't have separate copies of its knowledge for different people — it has **one** knowledge base with a sensitivity label on every single piece of it, checked automatically every time anyone asks a question:
+Cruz doesn't have separate copies of its knowledge for different people — it has **one** knowledge base with a sensitivity label on every single piece of it, checked automatically every time anyone asks a question. There are three underlying sensitivity labels:
 
-- **General** — the default level. Ordinary business information: client updates, ticket statuses, general correspondence. Most people at EOXS operate at this level.
-- **Company-Confidential** — anything sensitive to the business as a whole: salaries, financials, legal matters, vendor pricing, investor conversations. Reserved for the people who need it (e.g., HR).
-- **Raj-Personal** — anything personal to Raj specifically, never shown to anyone else, including under the Company-Confidential level.
+- **General** — ordinary business information: client updates, general correspondence. The default label for most content.
+- **Company-Confidential** — anything sensitive to the business as a whole: salaries, financials, legal matters, vendor pricing, investor conversations, and employee activity/performance monitoring data.
+- **Raj-Personal** — anything personal to Raj specifically, never shown to anyone else, under any circumstances.
 
-Access is tied to *how* someone connects to Cruz, not something they can adjust themselves — there's no toggle or setting anyone can flip to see more than they're supposed to. The restriction is enforced centrally, once, inside the database layer itself, so it can't be bypassed by asking a clever question or approaching it from a different angle.
+Four different connections see different combinations of this, plus an extra layer that strips specific *kinds* of detail even from content someone is otherwise allowed to see in full:
+
+| Connection | Sees Company-Confidential? | What gets stripped regardless |
+|---|---|---|
+| **Raj** | Yes, plus his own Personal content | Nothing |
+| **HR** | Yes | Every dollar figure *except* payroll/salary/incentive amounts |
+| **General staff** | Yes | Every dollar figure (including payroll), and any employee activity/performance-monitoring detail |
+| **Interns** | No (General only) | Every dollar figure |
+
+Access is tied to *how* someone connects to Cruz, not something they can adjust themselves — there's no toggle or setting anyone can flip to see more than they're supposed to. The restriction is enforced in two layers: once centrally, at the database level, and a second time by an independent AI check on the actual text of every response, specifically to catch anything the first layer got wrong. Neither can be bypassed by asking a clever question or approaching it from a different angle.
 
 ## 5. Who owns what
 
@@ -76,10 +85,14 @@ This is a deliberate design choice: the system is trusted to do all the repetiti
 
 ## 9. Where to go for more technical detail
 
-This document deliberately stays non-technical. Five companion documents in `docs/` go deep on each part of the system for engineers being onboarded to specific work:
+This document deliberately stays non-technical. Companion documents in `docs/` go deep on each part of the system for engineers being onboarded to specific work:
 
 - `docs/backend-server.md` — the server itself: what runs on it, how, and where.
 - `docs/postgres-database.md` — the database: every table, every relationship, real current data.
-- `docs/raw-ingestion.md` — how data gets fetched from all 9 sources and automated.
+- `docs/raw-ingestion.md` — how data gets fetched from every source and automated.
 - `docs/wiki-ingestion.md` — how raw data becomes AI-written knowledge pages.
 - `docs/linear-integration.md` — how progress reporting to Linear works, end to end.
+- `docs/local-dev-and-team-onboarding.md` — how to set up a local development environment and onboard a new engineer, staying off production entirely.
+- `docs/training/` — the intern/new-hire orientation video scripts and role-specific training material.
+
+Cruz's chat-thread-saving functionality (`save_chat_transcript`, for frontend conversations) is **not** part of this repo — it's a standalone sibling system, `eoxssecondbrain/eoxs-frontend-threads`, deliberately kept separate so raw conversation volume never bloats this codebase.

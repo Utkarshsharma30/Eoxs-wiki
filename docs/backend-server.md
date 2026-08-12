@@ -14,12 +14,15 @@ All app-level systemd units live in `deploy/` in the repo (installed as `/etc/sy
 |---|---|---|---|
 | `eoxs-ingestion.service` | simple, `Restart=always` | `python3 -m ingestion.server` | always-on |
 | `eoxs-mcp.service` | simple, `Restart=always` | `python3 -m mcp_server.http_server` | always-on |
+| `eoxs-wiki-mcp.service` | simple, `Restart=always` | `python3 -m wiki_ingestion.mcp_http_server` | always-on — internal-only MCP server the wiki-pipeline's `claude -p` sub-agents connect to, never customer-facing |
 | `eoxs-sweep.service` | oneshot | `python3 -m ingestion.server --sweep` | triggered by its timer |
 | `eoxs-sweep.timer` | timer | triggers the above | `OnCalendar=00/2:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 2 hours, ±2min jitter, catches up after a reboot |
 | `eoxs-wiki-pipeline.service` | oneshot, `TimeoutStartSec=infinity` | `python3 -m wiki_ingestion.run_pipeline` | triggered by its timer |
 | `eoxs-wiki-pipeline.timer` | timer | triggers the above | `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours |
 | `pgweb.service` | simple, `Restart=always` | `pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin ...` | always-on |
 | `nginx.service` | system-provided | reverse proxy (see §4) | always-on |
+
+A sibling system, `eoxssecondbrain/eoxs-frontend-threads` (a separate repo, its own clone at `/home/deploy/eoxs-frontend-threads`, its own venv, its own `eoxs-frontend-threads.service`), runs on this same physical box but is **not** part of this repo's codebase — deliberately split out so raw frontend-chat-thread volume never bloats this system, same reasoning as `claude-notes-vault`'s split from `raj-wiki-vault`. It has its own dedicated `eoxs_frontend_threads` database on this same Postgres instance.
 
 `eoxs-wiki-pipeline.service`'s `TimeoutStartSec=infinity` is deliberate — it runs sequential `claude -p` sub-agent calls that can take 3–5+ minutes per batch and hours for a full run, which would otherwise hit systemd's default ~90s oneshot timeout and get killed mid-run.
 
@@ -62,15 +65,16 @@ Two-phase design, both phases kept in `deploy/`:
 
 The ingestion server's logs show routine internet-scanner noise (`GET /mysql-admin/`, `/cgi-bin/snapshot.cgi`, etc., all 404) — expected background noise for any bare-IP HTTPS listener with no WAF, not a sign of compromise.
 
-## 5. MCP Server (`mcp_server/`, 822 lines across 4 files)
+## 5. MCP Server (`mcp_server/`)
 
-This is where the 3-tier access-rights system is actually enforced. See `docs/postgres-database.md` for the `access_tier` column itself; this section is about the serving layer.
+This is where the access-rights system is actually enforced. See `docs/postgres-database.md` for the `access_tier` column itself; this section is about the serving layer.
 
-- `mcp_server/db.py` (35 lines) — thin psycopg2 helper (`get_conn`, `query`, `query_one`), `RealDictCursor`.
-- `mcp_server/server.py` (684 lines) — the 20 tool implementations, plus a stdio-transport `Server` instance for local use (Claude Code CLI / Claude Desktop).
-- `mcp_server/http_server.py` (103 lines) — Starlette app wrapping the tools for SSE/remote-connector access (claude.ai's "Add custom connector").
+- `mcp_server/db.py` — thin psycopg2 helper (`get_conn`, `query`, `query_one`), `RealDictCursor`.
+- `mcp_server/server.py` — the 17 tool implementations, plus a stdio-transport `Server` instance for local use (Claude Code CLI / Claude Desktop).
+- `mcp_server/http_server.py` — Starlette app wrapping the tools for SSE/remote-connector access (claude.ai's "Add custom connector").
+- `mcp_server/redaction.py` — the query-time redaction safety net (see below), independent of and in addition to the SQL-level tier filtering.
 
-**The clearance-scoped identity pattern**: `build_server(clearance, name=...)` builds a *fresh* `mcp.server.Server` instance every call, with tier-filtered tools bound to a specific `clearance` list via `functools.partial` **at construction time**. `clearance` is never part of any tool's JSON `inputSchema` — nothing a caller sends can widen its own access. Three additive clearance levels:
+**The clearance-scoped identity pattern**: `build_server(clearance, name=..., extra_redact_categories=())` builds a *fresh* `mcp.server.Server` instance every call, with tier-filtered tools bound to a specific `clearance` list via `functools.partial` **at construction time**. `clearance` is never part of any tool's JSON `inputSchema` — nothing a caller sends can widen its own access. Three additive tier levels underlie everything:
 
 ```
 FULL_CLEARANCE    = ["tier1", "tier2_confidential", "tier2"]
@@ -78,24 +82,29 @@ HR_CLEARANCE      = ["tier2_confidential", "tier2"]
 GENERAL_CLEARANCE = ["tier2"]
 ```
 
-`http_server.py` creates **three separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header):
+`http_server.py` creates **four separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
 
-| Identity | Secret env var | Clearance |
-|---|---|---|
-| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` |
-| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` |
-| `general` | `MCP_GENERAL_URL_SECRET` | `GENERAL_CLEARANCE` |
+| Identity | Secret env var | Clearance | Extra redaction |
+|---|---|---|---|
+| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none |
+| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive |
+| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) |
+| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) |
 
-A **4th** `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE)`) exists purely for local stdio transport — always full clearance, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway.
+A **5th** `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE)`) exists purely for local stdio transport — always full clearance, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway.
 
-**Transport**: SSE (`mcp.server.sse.SseServerTransport`), not Streamable-HTTP — a documented design choice, since an earlier Streamable-HTTP + Authorization-header attempt didn't fit what claude.ai's connector dialog exposes (only an OAuth Client Secret field, no generic header input). Routes per identity: `GET /mcp/<secret>/sse` and `Mount /mcp/<secret>/messages/`.
+**The redaction safety net** (`mcp_server/redaction.py`): runs on every tool call for every identity except `full`. Independent of the SQL-level tier filter — it inspects the actual text of what's about to be returned and strips anything matching a restricted category, catching cases where the original tier classification was wrong. Uses Sonnet (not Haiku), redacts by exact verbatim span removal (never regenerates text), fails closed on repeated API error. Every actual redaction is logged to `mcp_redaction_log` (schema 023) for follow-up.
+
+**Transport**: SSE (`mcp.server.sse.SseServerTransport`), not Streamable-HTTP — a documented design choice, since an earlier Streamable-HTTP + Authorization-header attempt didn't fit what claude.ai's connector dialog exposes (only an OAuth Client Secret field, no generic header input). Routes per identity: `GET /mcp/<secret>/sse` and `Mount /mcp/<secret>/messages/`. Adding a real Streamable-HTTP endpoint (for non-claude.ai clients, e.g. a custom frontend) is planned but not yet built — see the DigitalOcean migration roadmap.
 
 **Port**: `MCP_HTTP_PORT` (default **8091**), binds `127.0.0.1` only — reachable solely via the nginx `/mcp/` proxy.
 
-**Tool count: 20**, all read-only SELECTs (the module is read-only end to end):
-`get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `list_calls`, `search_calls`, `get_call`, `get_ticket`, `search_tickets`, `get_invoice`, `search_invoices`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
+**Tool count: 17**, all read-only SELECTs (the module is read-only end to end):
+`get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
 
-17 of these are tier-filtered (all except `list_clients`/`list_contacts`, which have no `access_tier` column). A not-found response is deliberately indistinguishable from an access-denied one across every identifier-lookup tool — a lower-clearance caller can't use the difference to confirm a restricted record's existence. `get_client_profile` is a notable aggregator, pulling contacts/tickets/tasks/emails/calls/sales-order and wiki counts for one client in a single call, all identically clearance-filtered.
+`get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
+
+Most tools are tier-filtered (all except `list_clients`/`list_contacts`, which have no `access_tier` column). A not-found response is deliberately indistinguishable from an access-denied one across every identifier-lookup tool — a lower-clearance caller can't use the difference to confirm a restricted record's existence. `get_client_profile` is a notable aggregator, pulling contacts/tasks/emails/calls and wiki counts for one client in a single call, all identically clearance-filtered.
 
 **Known current-state gap**: `eoxs_readonly` (a genuinely read-only Postgres role) exists and is correctly scoped, but the MCP server does **not** currently connect as it — `mcp_server/db.py` reads the same `.env` `PGUSER`/`PGPASSWORD` as everything else, which is `eoxs_app` (full read-write). The "read-only" guarantee today is a code-discipline convention (every tool only issues SELECTs), not a database-enforced one. Switching the MCP server to connect as `eoxs_readonly` would close this gap and is a reasonable near-term hardening task.
 
@@ -137,7 +146,7 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 **Postgres:** `PGHOST`, `PGPORT`, `PGDATABASE`, `PGDATABASE_STAGING`, `PGUSER`, `PGPASSWORD`
 
-**MCP server:** `MCP_URL_SECRET`, `MCP_HR_URL_SECRET`, `MCP_GENERAL_URL_SECRET`, `MCP_HTTP_PORT`
+**MCP server:** `MCP_URL_SECRET`, `MCP_HR_URL_SECRET`, `MCP_GENERAL_URL_SECRET`, `MCP_INTERN_URL_SECRET`, `MCP_HTTP_PORT`
 
 **Anthropic:** `ANTHROPIC_API_KEY` (spam/relevance filters), `CLASSIFIER_ANTHROPIC_API_KEY` (tier classification — deliberately separate for independent cost tracking)
 
@@ -157,4 +166,4 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 ## 9. Where this fits in the overall system
 
-The backend server is the one physical machine everything else in this document set lives on: it hosts the database (`docs/postgres-database.md`), runs the raw-ingestion fetchers and their schedule (`docs/raw-ingestion.md`), runs the wiki-synthesis pipeline (`docs/wiki-ingestion.md`), and is where the Linear-reporting code executes from (`docs/linear-integration.md`). Nothing in this system runs anywhere else — there's no separate worker fleet, no managed cloud database, no serverless functions. One VPS, six services, one Postgres instance.
+The backend server is the one physical machine everything else in this document set lives on: it hosts the database (`docs/postgres-database.md`), runs the raw-ingestion fetchers and their schedule (`docs/raw-ingestion.md`), runs the wiki-synthesis pipeline (`docs/wiki-ingestion.md`), and is where the Linear-reporting code executes from (`docs/linear-integration.md`). It also hosts the sibling `eoxs-frontend-threads` system (§2) and a Claude Code CLI / Codex CLI environment used directly for admin and development work (including a persistent `claude --teleport` session) — a real, load-bearing use of this being a full VPS, not just a place to run services, and the main reason a migration to a pure container-platform (see the DigitalOcean migration roadmap) can't simply move everything off it. Nothing in this system runs anywhere else — there's no separate worker fleet, no managed cloud database, no serverless functions. One VPS, seven `eoxs-wiki-db` services plus one sibling-repo service, one Postgres instance.

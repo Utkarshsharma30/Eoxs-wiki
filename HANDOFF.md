@@ -1,5 +1,12 @@
 # eoxs-wiki-db — Full Handoff Context for VPS-Native Claude
 
+> **SUPERSEDED, kept for history only.** This was the point-in-time handoff before the
+> wiki-ingestion DB-native rewrite (§8 here) and everything since. That work is done and
+> long since covered by real, current docs. **Start at `CLAUDE.md` (repo root) instead** —
+> it orients a fresh session and points to `ARCHITECTURE.md` and every `docs/*.md` file,
+> all of which are kept current. Nothing below this line should be treated as the current
+> state of the system.
+
 This document is written to be pasted into a fresh Claude session running natively on the
 Ubuntu VPS (`deploy@5.223.44.95`, tmux session `eoxs-wiki-db`, project at
 `~/eoxs-wiki-db/`), so that session can continue this build with zero loss of context.
