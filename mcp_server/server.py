@@ -42,6 +42,7 @@ from mcp.types import Tool, TextContent
 
 from mcp_server.db import query as db_query, query_one as db_query_one
 from mcp_server import redaction
+from mcp_server.employees import EMPLOYEE_TOOLS, EMPLOYEE_WRITE_TOOLS, tool_defs as employee_tool_defs
 
 BODY_PREVIEW_CHARS = 1500  # full body is often 10-50K chars; a preview keeps get_* calls usable
 
@@ -467,8 +468,8 @@ TOOLS = {
 }
 
 
-def _tool_defs():
-    return [
+def _tool_defs(enable_employee_tools=False):
+    defs = [
         Tool(
             name="get_index",
             description="Return row counts across all tables — the DB equivalent of the wiki index.",
@@ -582,9 +583,12 @@ def _tool_defs():
             inputSchema={"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
         ),
     ]
+    if enable_employee_tools:
+        defs = defs + employee_tool_defs()
+    return defs
 
 
-def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=()):
+def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), enable_employee_tools=False, identity_name=None):
     """Builds a fresh Server instance whose tier-filtered tools are all
     bound to `clearance`. Each identity (stdio/local, or one HTTP/SSE
     secret path) gets its OWN Server instance from this -- clearance is
@@ -596,16 +600,33 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=()):
     redaction.check_and_redact() call for this identity -- content-based
     restrictions with no access_tier equivalent (e.g. the intern
     identity's "no monetary amounts", same row-level access as
-    GENERAL_CLEARANCE otherwise). See mcp_server/redaction.py."""
+    GENERAL_CLEARANCE otherwise). See mcp_server/redaction.py.
+
+    enable_employee_tools: gates the ENTIRE employees.py tool set (read
+    and write alike) onto this identity -- deliberately not tied to
+    `clearance` at all, since employees has no access_tier and 'general'
+    shares HR_CLEARANCE's clearance list with 'hr' for other tools but
+    must NOT get employee access. Only the `full` and `hr` identities pass
+    True for this (see http_server.py's IDENTITIES). Write tools
+    (EMPLOYEE_WRITE_TOOLS) get `changed_by` bound to identity_name here,
+    the same construction-time-binding pattern as `clearance` -- never
+    part of a tool's inputSchema, so a caller can't spoof who made a
+    change."""
     tools = {
         tool_name: (functools.partial(func, clearance=clearance) if tool_name in TIER_FILTERED_TOOLS else func)
         for tool_name, func in TOOLS.items()
     }
+    if enable_employee_tools:
+        who = identity_name or name
+        tools.update({
+            tool_name: (functools.partial(func, changed_by=who) if tool_name in EMPLOYEE_WRITE_TOOLS else func)
+            for tool_name, func in EMPLOYEE_TOOLS.items()
+        })
     srv = Server(name)
 
     @srv.list_tools()
     async def list_tools():
-        return _tool_defs()
+        return _tool_defs(enable_employee_tools)
 
     @srv.call_tool()
     async def call_tool(tool_name, arguments):
@@ -635,10 +656,12 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=()):
 # Local/stdio access (Claude Code CLI, Claude Desktop) -- full clearance,
 # since running this file at all already requires the .env Postgres
 # credentials, i.e. trusted-equivalent access with no narrower boundary
-# to enforce here. The HTTP/SSE transport in http_server.py builds its
-# own separate, narrower instance(s) via build_server() instead of using
-# this one.
-server = build_server(FULL_CLEARANCE)
+# to enforce here. Employee tools included too, same reasoning -- also
+# identity_name="full" so employee_change_log attributes local-access
+# writes the same way the `full` HTTP identity's are. The HTTP/SSE
+# transport in http_server.py builds its own separate, narrower
+# instance(s) via build_server() instead of using this one.
+server = build_server(FULL_CLEARANCE, enable_employee_tools=True, identity_name="full")
 
 
 async def main():

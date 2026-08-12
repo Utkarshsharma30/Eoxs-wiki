@@ -1,4 +1,8 @@
-"""DB connection helper for the MCP server. Read-only queries only."""
+"""DB connection helper for the MCP server. Read-only for every existing
+table -- execute() below is the one exception, added specifically for the
+employees table (mcp_server/employees.py), the first write path this MCP
+server has ever had. Every other tool in this codebase only ever calls
+query()/query_one()."""
 import os
 from pathlib import Path
 
@@ -33,3 +37,17 @@ def query(sql, params=None):
 def query_one(sql, params=None):
     rows = query(sql, params)
     return rows[0] if rows else None
+
+
+def execute(sql, params=None):
+    """Runs an INSERT/UPDATE with a RETURNING clause and commits. Returns the
+    single returned row as a dict, or None if RETURNING produced no row."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+    finally:
+        conn.close()

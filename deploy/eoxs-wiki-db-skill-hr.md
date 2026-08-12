@@ -5,12 +5,13 @@ description: Navigation and access-scope guide for the HR/trusted-clearance EOXS
 
 # EOXS Data — Session Skill (HR / Trusted Access)
 
-You have two EOXS data connectors, both **read-only**. They are different
-systems with different shapes.
+You have two EOXS data connectors. **eoxs-teams is fully read-only. eoxs-db is
+read-only except for one thing: the employee directory** (§3) — everything
+else on eoxs-db is exactly as read-only as eoxs-teams.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki | 17 purpose-built tools |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, **plus the employee directory** | 24 tools: 17 read-only + 7 for the employee directory only (§3, §5) |
 | **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 
 All EOXS data here is confidential — business correspondence, financials,
@@ -104,14 +105,36 @@ amount the same plain way as a not-found.
 
 ---
 
-## 3. What these connectors do not have
+## 3. Write scope — one exception, and nothing else
 
-Neither connector has any write capability of any kind. There is nothing here
-that creates, updates, or modifies a task, record, or any other data, on
-either connector or any other system. Do not describe, imply, or attempt an
-action that changes data — there is no tool for it, on this connection, ever.
-If asked to create or change something, say plainly that this connection is
-read-only and cannot do that.
+**The only write capability on either connector, anywhere, is the employee
+directory on eoxs-db**: `create_employee`, `update_employee`,
+`deactivate_employee`, `reactivate_employee` (tool details in §5). Every
+other piece of data reachable from this connection — wiki pages, emails,
+calls, implementation tasks, clients, contacts, and everything on
+`eoxs-teams` (tickets, invoices/sales orders, CRM/pipeline) — remains fully
+read-only, with no exceptions. There is no tool that creates, updates, or
+removes any of it. If asked to change something outside the employee
+directory, say plainly that this connection is read-only for that and
+cannot do it.
+
+For the employee directory itself:
+
+- These four tools write directly to the live `employees` table, immediately
+  — no preview step, no undo tool. Removing someone is `deactivate_employee`
+  (a soft delete — the record and its full history stay intact, reachable via
+  `status="inactive"`); there is no hard-delete tool anywhere.
+- **State plainly what you're about to do and get an explicit go-ahead before
+  calling any of these four** — e.g. "I'll update Priya's department to
+  Marketing — confirm?" — every time, even for a small-looking change. Don't
+  chain a write onto a read in the same turn without that confirmation
+  appearing first.
+- **Never write speculatively.** Only when asked for that specific change, in
+  this conversation, in as many words.
+- After a write, report exactly what changed using the tool's own returned
+  row — don't describe it in softened or approximate terms.
+- If a write fails (e.g. a duplicate email, an unknown `employee_id`), say so
+  plainly. Don't retry with altered values hoping it lands.
 
 ---
 
@@ -137,7 +160,7 @@ say which you used.
 
 ## 5. Tools
 
-### eoxs-db — 17 tools, all read-only
+### eoxs-db — 24 tools: 17 read-only + 7 employee-directory (read + write, §3)
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to
 the matching `get_*`. Never construct or guess a `source_file_path`** —
@@ -171,6 +194,18 @@ data here anymore — see §1.
 `list_implementation_tasks(client, stage)` ·
 `search_implementation_tasks(query, client)` · `get_implementation_task(task_id)`
 `task_id` is an integer, unlike the string identifiers other tools take.
+
+**Employees** (read) — `list_employees(status="active", department="")` ·
+`search_employees(query_text, status="active")` · `get_employee(identifier)`
+**Employees** (write — read §3 before using any of these) —
+`create_employee(full_name, department="", role_title="", employment_type="",
+official_email="", manager="", date_of_joining="", notes="")` ·
+`update_employee(employee_id, ...)` — only pass fields you want changed ·
+`deactivate_employee(employee_id, date_of_leaving="")` — soft delete ·
+`reactivate_employee(employee_id)`
+`status`: `"active"` (default — current headcount) | `"inactive"` (people who
+left) | `"all"`. `get_employee` also returns `change_history` — every prior
+edit, who made it, and when.
 
 ### eoxs-teams — 4 tools, read-only SQL
 
@@ -240,6 +275,12 @@ only if the question could plausibly be answered from correspondence instead
 something. If the question is about onboarding/dev work rather than a support
 ticket, that's `search_implementation_tasks` on eoxs-db instead — different
 board, different source, still in this system.
+
+**Who's employed, someone's role/department/manager, onboarding/offboarding**
+→ `eoxs-db`'s employee tools (§5). `list_employees`/`search_employees`
+default to active headcount only — pass `status="inactive"`/`"all"` for
+someone who's left. Any create/update/deactivate/reactivate needs an
+explicit confirmation first, per §3.
 
 **Payroll, compensation, salary, investor/financial questions** (that ARE in
 eoxs-db — emails, wiki, etc., not the ticket/invoice data now on eoxs-teams)

@@ -29,7 +29,16 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   `docs/backend-server.md` §5 for exact category names.
 - **Tickets and invoices are gone from every MCP tool** (`get_ticket`/`search_tickets`/
   `get_invoice`/`search_invoices` removed 2026-08-10) — that data now lives only in the
-  separate `eoxs-teams` Odoo connector. **17 tools remain.**
+  separate `eoxs-teams` Odoo connector. **17 read-only tools remain, present for every
+  identity.**
+- **Employee directory added 2026-08-12** (`employees` table + `mcp_server/employees.py`)
+  — this server's first-ever write path. 7 tools (list/search/get + create/update/
+  deactivate/reactivate_employee), gated to the `full` (Raj) and `hr` (Isha) identities
+  only — **24 tools total** for those two, still 17 for `general`/`intern`. Soft-delete
+  only (`status` active/inactive, never a real `DELETE`); every write audited to
+  `employee_change_log`. Deliberately outside the tiered-content system (no `access_tier`
+  column) and outside the wiki-ingestion pipeline entirely — see `docs/backend-server.md`
+  §5.1 and `docs/postgres-database.md`.
 - **Gmail accounts are now DB-backed, not hardcoded `.env` triplets** (`oauth_accounts` table,
   2026-08-12) — `raj_gmail`/`ron_gmail`/`remya_gmail` migrated over unchanged (same behavior:
   remya excluded from the recurring sweep via `raw_sweep_enabled=false`, not a name check
@@ -38,15 +47,6 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   one-time link, logs into Google directly (never sees our system, never types a password
   anywhere we control), and is picked up by the next 2-hour sweep automatically, no `.env`
   edit or restart needed. See `docs/raw-ingestion.md` §2 Gmail.
-- **The same self-serve OAuth pattern now covers Zoho too** (`ingestion/oauth_zoho.py`,
-  2026-08-12) — `support_zoho` migrated into `oauth_accounts` unchanged
-  (`client_type='legacy'`). New Zoho accounts connect the same one-link way Gmail's do, with
-  one difference: Zoho requires a per-mailbox `external_account_id`, auto-discovered via
-  `GET /api/accounts` right after the token exchange — nothing manual. Also: `email_threads.source_account`
-  was a fixed Postgres enum (only the 4 original accounts) — converted to plain `TEXT`, since a
-  rigid enum meant every future self-serve-connected account needed its own schema migration
-  before it could write a single row, defeating the point of self-serve. See
-  `docs/raw-ingestion.md` §2 Zoho.
 - **Known, unresolved bug**: the recurring sweep still writes new rows to `tickets` despite
   the removal above — the fix never reached `tickets_fetcher.py`'s registration in the sweep
   itself. See `docs/raw-ingestion.md` §12. Real, live, growing — not just a doc gap.

@@ -34,16 +34,14 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 022 | `022_invoices_live.sql` | Makes invoice-related columns nullable for live-only orders; adds `sales_order_events`, `invoices`, `invoice_lines`. |
 | 023 | `023_mcp_redaction_log.sql` | `mcp_redaction_log` — audit trail for every time the MCP server's query-time redaction safety net actually strips content (see `docs/backend-server.md` §5). |
 | 024 | `024_email_attachment_extraction.sql` | Adds `source_attachment_id`, `mimetype`, `extracted_text` to `email_attachments` — closes the gap where attachment content was structurally invisible to every MCP tool. |
+| 025 | `025_employees.sql` | `employees` (directly-written HR directory, soft-delete via `employee_status` enum) + `employee_change_log` (audit trail). The first write-capable table this MCP server exposes — see `docs/backend-server.md` §5. |
 | 026 | `026_oauth_accounts.sql` | `oauth_accounts` (per-account Gmail refresh tokens, replaces hardcoded `.env` triplets) + `oauth_connect_tokens` (single-use expiring self-serve connect links). See `docs/raw-ingestion.md` §2 Gmail and `ingestion/oauth_gmail.py`. |
-| 027 | `027_oauth_client_type.sql` | `oauth_accounts.client_type` — which registered OAuth client (Desktop vs Web app, or the Zoho equivalent) a given account's refresh_token belongs to. |
-| 028 | `028_oauth_pkce_verifier.sql` | `oauth_connect_tokens.code_verifier` — persists the PKCE verifier between the /connect and /callback requests (Gmail's self-serve flow only; Zoho's hand-rolled flow doesn't use PKCE). |
-| 029 | `029_oauth_accounts_zoho.sql` | Generalizes `oauth_accounts` for Zoho: adds `external_account_id` (Zoho's numeric per-mailbox identifier), relaxes `client_type`'s CHECK constraint to free text. |
-| 030 | `030_source_account_text.sql` | Converts `email_threads.source_account` from a fixed enum to `TEXT` — a rigid enum meant every new self-serve-connected account needed a schema migration before its first write. |
 
 ## 2. Every table, grouped logically
 
-**38 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**40 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
+- **Employee directory:** `employees`, `employee_change_log` — directly-written operational data, deliberately NOT part of the wiki/tiered-content system (no `access_tier` column, never cited by a wiki page, never touched by wiki_ingestion). The only tables in this database with a write path through the MCP server at all — gated to the `full` (Raj) and `hr` (Isha) identities only, see `docs/backend-server.md` §5.
 - **Reference:** `clients`, `contacts`
 - **Emails:** `email_threads`, `email_messages`, `email_attachments`
 - **Wiki (live):** `wiki_pages`, `wiki_links`, `wiki_citations`, `wiki_flags`
@@ -52,7 +50,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Calls:** `call_transcripts`, `call_segments`
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
 - **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
-- **Connected-account credentials:** `oauth_accounts` (per-account Gmail *and Zoho* refresh tokens — `gmail_fetcher.py`/`zoho_fetcher.py`'s `load_accounts()` read this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled; `external_account_id` is Zoho-only, its numeric per-mailbox identifier; `client_type` picks which registered OAuth client to refresh against), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback; `code_verifier` is Gmail-flow-only, PKCE). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
+- **Connected-account credentials:** `oauth_accounts` (per-account Gmail refresh tokens — `gmail_fetcher.py`'s `load_accounts()` reads this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
 
 A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
@@ -61,9 +59,11 @@ A sibling database, `eoxs_frontend_threads` (same Postgres instance, different l
 
 No `CHECK` constraints exist anywhere — `access_tier` is enforced purely as a Postgres **ENUM type**, not a check constraint.
 
-**`access_tier` enum**, exact values in ordinal order: `tier1`, `tier2_confidential`, `tier2`. (`tier2_confidential` sorts *before* `tier2` in ordinal position because it was added via `ALTER TYPE ... ADD VALUE 'tier2_confidential' AFTER 'tier1'` — don't rely on alphabetical/ordinal sort implying anything about restrictiveness.)
+**`access_tier` enum**, exact values in ordinal order: `tier1`, `tier2_confidential`, `tier2`. (`tier2_confidential` sorts *before* `tier2` in ordinal position because it was added via `ALTER TYPE ... ADD VALUE 'tier2_confidential' AFTER 'tier1'` — don't rely on alphabetical/ordinal sort implying anything about restrictiveness.) `employees` does NOT have this column — access to it is gated entirely at the MCP-identity level (`full`/`hr` only), not by row-level tier.
 
-Other enums: `call_source` (`fireflies`, `fathom`), `wiki_flag_type` (`contradiction`, `unverified`), `wiki_page_type` (`entity`, `concept`, `source`, `analysis`, `overview`, `prospect`). (`email_source_account` existed here until schema/030 converted `email_threads.source_account` to plain `TEXT` — a fixed enum meant every new self-serve-connected account needed its own migration before its first write.)
+**`employee_status` enum**: `active`, `inactive`. Soft-delete only — `deactivate_employee` never issues a real `DELETE`, matching `implementation_tasks`' existing `mark_tasks_inactive()` pattern (see `docs/raw-ingestion.md` §3).
+
+Other enums: `call_source` (`fireflies`, `fathom`), `email_source_account` (`raj_gmail`, `ron_gmail`, `remya_gmail`, `support_zoho`), `wiki_flag_type` (`contradiction`, `unverified`), `wiki_page_type` (`entity`, `concept`, `source`, `analysis`, `overview`, `prospect`).
 
 Per-table structure (columns, types, keys) as it exists right now:
 
@@ -74,7 +74,7 @@ clients: id serial PK, slug text UNIQUE NOT NULL, display_name text NOT NULL,
 contacts: id serial PK, client_id int FK->clients, name text NOT NULL, email text,
   is_relay_inbox bool DEFAULT false, created_at/updated_at timestamptz
 
-email_threads: id serial PK, source_account text NOT NULL,
+email_threads: id serial PK, source_account email_source_account NOT NULL,
   gmail_thread_id text NOT NULL, subject/from_addr/to_addr text, message_count int,
   participants text[], thread_dates timestamptz[], tags text[], is_quarantined bool,
   generated_at timestamptz, source_file_path text NULL, client_id int FK->clients,
@@ -214,13 +214,27 @@ wiki_staging.wiki_pages: id serial PK, live_page_id int NULL (informal, no FK �
 
 wiki_staging.wiki_links / wiki_citations / wiki_flags: same shapes as their public.wiki_*
   counterparts, but FK targets point at wiki_staging.wiki_pages instead of public.wiki_pages.
+
+employees: id serial PK, full_name text NOT NULL, department text, role_title text,
+  employment_type text (freetext -- 'full_time'/'intern'/'contractor'/'virtual_assistant' seen
+  so far, not an enum -- this vocabulary is expected to keep growing), official_email text
+  (partial UNIQUE index WHERE NOT NULL), manager text (freetext name, not a self-FK),
+  date_of_joining date, date_of_leaving date, status employee_status NOT NULL DEFAULT 'active',
+  notes text, created_at/updated_at timestamptz
+  -- no access_tier column -- see access_tier enum note above
+
+employee_change_log: id serial PK, employee_id int NOT NULL FK->employees,
+  changed_by text NOT NULL ('full' | 'hr' -- the MCP identity name, bound at server-construction
+  time, never taken from a tool call's own arguments), change_type text NOT NULL
+  ('created' | 'updated' | 'deactivated' | 'reactivated'), changes jsonb (old/new per field,
+  or a full snapshot for 'created'), occurred_at timestamptz
 ```
 
 ## 4. Indexes
 
 Every FK column has a supporting btree index (60+ total across the database), plus:
 
-- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`
+- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`, `idx_employees_name_trgm`
 - **Full-text search (GIN, tsvector):** `idx_email_messages_tsv`, `idx_wiki_pages_tsv`, `idx_call_transcripts_tsv`
 - **Partial indexes:** `idx_call_transcripts_api_natural_key` (UNIQUE on `(source, external_id) WHERE source_file_path IS NULL`); `idx_wiki_links_unresolved` (`wiki_links(to_title_raw) WHERE to_page_id IS NULL`)
 - **`access_tier`** is plain-btree indexed (not GIN) on every table that has it: `email_threads`, `call_transcripts`, `tickets`, `implementation_tasks`, `sales_orders`, `wiki_pages`, `wiki_staging.wiki_pages`

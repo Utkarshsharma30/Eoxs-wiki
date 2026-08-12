@@ -44,6 +44,13 @@ no header/param a client could send to widen its own access:
     them stripped, on top of the normal tier2-only filtering. For interns
     -- same data as any other employee, minus every number that's money.
 
+2026-08-12: `full` and `hr` also get the employees.py tool set (the first
+write-capable tools this server has ever exposed) -- list/search/get plus
+create/update/deactivate/reactivate_employee, gated independently of
+`clearance` via `enable_employee_tools` (general/intern get none of it,
+even though `general` otherwise shares HR_CLEARANCE with `hr`). See
+mcp_server/employees.py and schema/025_employees.sql.
+
 Run with: python -m mcp_server.http_server  (dev, binds 127.0.0.1 only)
 Deployed via systemd as eoxs-mcp.service, reverse-proxied by nginx at
 https://5.223.44.95/mcp/<secret>/sse -- nginx passes /mcp/ through
@@ -78,8 +85,13 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 MOUNT_PREFIX = "/mcp"
 
 IDENTITIES = [
-    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, ()),
-    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",)),
+    # 5th element: enable_employee_tools -- the employees.py tool set
+    # (list/search/get + create/update/deactivate/reactivate_employee) is
+    # gated here, deliberately independent of `clearance` (see server.py's
+    # build_server() docstring): general/intern get NO employee tools at
+    # all, even though 'general' otherwise shares HR_CLEARANCE with 'hr'.
+    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True),
+    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True),
     # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
     # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
     # dollar figure alongside otherwise-relevant general content, and general
@@ -89,14 +101,15 @@ IDENTITIES = [
     # figure (including payroll -- unlike hr's non_payroll_monetary_amounts
     # carve-out); employee_activity_monitoring keeps Cattr/performance data
     # HR+full-only regardless of the wider tier clearance (see redaction.py).
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring")),
-    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",)),
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False),
+    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False),
 ]
 
 
-def _make_routes(identity_name, secret, clearance, extra_redact_categories=()):
+def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), enable_employee_tools=False):
     mcp_server_instance = build_server(
         clearance, name=f"eoxs-wiki-db-{identity_name}", extra_redact_categories=extra_redact_categories,
+        enable_employee_tools=enable_employee_tools, identity_name=identity_name,
     )
     sse = SseServerTransport(f"{MOUNT_PREFIX}/{secret}/messages/")
 
@@ -119,8 +132,8 @@ def _make_routes(identity_name, secret, clearance, extra_redact_categories=()):
 
 routes = [
     route
-    for identity_name, secret, clearance, extra in IDENTITIES
-    for route in _make_routes(identity_name, secret, clearance, extra)
+    for identity_name, secret, clearance, extra, enable_employee_tools in IDENTITIES
+    for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools)
 ]
 
 app = Starlette(routes=routes)

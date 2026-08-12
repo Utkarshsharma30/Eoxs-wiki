@@ -69,8 +69,9 @@ The ingestion server's logs show routine internet-scanner noise (`GET /mysql-adm
 
 This is where the access-rights system is actually enforced. See `docs/postgres-database.md` for the `access_tier` column itself; this section is about the serving layer.
 
-- `mcp_server/db.py` — thin psycopg2 helper (`get_conn`, `query`, `query_one`), `RealDictCursor`.
-- `mcp_server/server.py` — the 17 tool implementations, plus a stdio-transport `Server` instance for local use (Claude Code CLI / Claude Desktop).
+- `mcp_server/db.py` — thin psycopg2 helper (`get_conn`, `query`, `query_one`), `RealDictCursor`. Also `execute()` (2026-08-12) — the one write path, added specifically for `employees.py`.
+- `mcp_server/server.py` — the 17 read-only tool implementations, plus a stdio-transport `Server` instance for local use (Claude Code CLI / Claude Desktop).
+- `mcp_server/employees.py` (2026-08-12) — the employee-directory tool set: `list_employees`, `search_employees`, `get_employee` (read) + `create_employee`, `update_employee`, `deactivate_employee`, `reactivate_employee` (write) — this server's first-ever write-capable tools. See §5.1 below.
 - `mcp_server/http_server.py` — Starlette app wrapping the tools for SSE/remote-connector access (claude.ai's "Add custom connector").
 - `mcp_server/redaction.py` — the query-time redaction safety net (see below), independent of and in addition to the SQL-level tier filtering.
 
@@ -84,12 +85,22 @@ GENERAL_CLEARANCE = ["tier2"]
 
 `http_server.py` creates **four separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
 
-| Identity | Secret env var | Clearance | Extra redaction |
-|---|---|---|---|
-| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none |
-| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive |
-| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) |
-| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) |
+| Identity | Secret env var | Clearance | Extra redaction | Employee tools? |
+|---|---|---|---|---|
+| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) |
+| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) |
+| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No |
+| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No |
+
+### 5.1 Employee directory tools (2026-08-12) — the first write path
+
+`mcp_server/employees.py`'s 7 tools are gated onto `full` and `hr` **only**, via an `enable_employee_tools` flag on `build_server()` that is deliberately independent of `clearance` — `general` shares `HR_CLEARANCE`'s clearance *list* with `hr` for every other tool, but must not get employee access, so gating had to be a separate axis, not a clearance check. `employees` has no `access_tier` column at all; this table sits outside the tiered-content system entirely (see `docs/postgres-database.md` §3).
+
+Write tools (`create_employee`/`update_employee`/`deactivate_employee`/`reactivate_employee`) take a `changed_by` kwarg bound at server-construction time to the identity name (`"full"` or `"hr"`), the same pattern `clearance` already uses — never part of a tool's `inputSchema`, so nothing a caller sends can spoof who made a change. Every write is logged to `employee_change_log` (best-effort, matching `ingest_log.py`'s "a logging failure must never mask an otherwise-successful run" philosophy — the employee-table write itself is what has to succeed).
+
+Deletion is soft-delete only (`deactivate_employee` sets `status='inactive'`, never a real `DELETE`) — `list_employees`/`search_employees` default to `status='active'` (current headcount) and take an explicit `status='inactive'`/`'all'` argument for historical/former-employee lookups.
+
+One-off import: `loaders/import_employees_from_xlsx.py` merges EOXS's multi-sheet HR spreadsheet into one canonical row per person (deduped by name, then by shared email — catches same-person/different-spelling cases like "Dhrup" vs "Dhrup Kumar"). Deliberately excludes LinkedIn URLs, personal phone numbers, and — most importantly — a plaintext-password column present in the source sheet, never imported regardless of how this table gets used later.
 
 A **5th** `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE)`) exists purely for local stdio transport — always full clearance, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway.
 
@@ -99,8 +110,9 @@ A **5th** `Server` instance (`server.py`'s module-level `server = build_server(F
 
 **Port**: `MCP_HTTP_PORT` (default **8091**), binds `127.0.0.1` only — reachable solely via the nginx `/mcp/` proxy.
 
-**Tool count: 17**, all read-only SELECTs (the module is read-only end to end):
+**Tool count: 17** tiered/read-only tools, present for every identity:
 `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
+Plus **7 employee-directory tools** (§5.1), present only for `full`/`hr` — **24 tools total** for those two identities, 17 for `general`/`intern`.
 
 `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
 
