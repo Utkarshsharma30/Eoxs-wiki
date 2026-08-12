@@ -47,9 +47,12 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   one-time link, logs into Google directly (never sees our system, never types a password
   anywhere we control), and is picked up by the next 2-hour sweep automatically, no `.env`
   edit or restart needed. See `docs/raw-ingestion.md` §2 Gmail.
-- **Known, unresolved bug**: the recurring sweep still writes new rows to `tickets` despite
-  the removal above — the fix never reached `tickets_fetcher.py`'s registration in the sweep
-  itself. See `docs/raw-ingestion.md` §12. Real, live, growing — not just a doc gap.
+- **RESOLVED 2026-08-12** (was listed here as unresolved): the recurring sweep no longer writes
+  new rows to `tickets`/`invoices` — `run_full_sweep()`'s source list in `ingestion/server.py`
+  never had `tickets_fetcher.py`/`invoice_fetcher.py` removed from it when those tools were
+  pulled from MCP on 2026-08-10, so it kept calling them every 2 hours regardless. Fixed; the
+  17 stray rows this wrote (100% of what was in `tickets` — none of it reachable via any tool)
+  were deleted. See `docs/raw-ingestion.md` §3 (Tickets & Invoices section).
 - **`eoxs-frontend-threads` is a separate repo and separate service**
   (`github.com/eoxssecondbrain/eoxs-frontend-threads`), not part of this codebase — deployed
   alongside this system on the same box, own database (`eoxs_frontend_threads`), own venv.

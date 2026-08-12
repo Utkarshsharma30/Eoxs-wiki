@@ -50,8 +50,6 @@ from ingestion.zoho_fetcher import process_zoho, load_accounts as load_zoho_acco
 from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
-from ingestion.tickets_fetcher import process_tickets
-from ingestion.invoice_fetcher import process_invoices
 from ingestion.ingest_log import log_run
 from ingestion.linear_report import start_sweep_parent, finish_sweep_parent, start_source_task, finish_source_task
 from ingestion.state import now_utc
@@ -141,8 +139,22 @@ def run_full_sweep():
         # instruction, not an ongoing source -- odoo_fetcher.py still
         # supports it directly (python -m ingestion.odoo_fetcher) if ever
         # needed again; this only stops the automatic recurring fetch.
-        ("tickets", process_tickets),
-        ("invoices", process_invoices),
+        #
+        # "tickets"/"invoices" removed 2026-08-12: get_ticket/search_tickets/
+        # get_invoice/search_invoices were removed from every MCP tool back
+        # on 2026-08-10 (that data now lives only in the separate eoxs-teams
+        # Odoo connector), but this registration was never updated to match
+        # -- the sweep kept calling process_tickets()/process_invoices()
+        # every 2 hours regardless, writing tickets/ticket_events rows
+        # nothing could ever read and flooding the Linear EDB board with
+        # child tasks for a source that's supposed to be gone. Real, this
+        # was a known bug (see CLAUDE.md/docs/raw-ingestion.md before this
+        # fix), not a hypothetical -- 100% of the 17 rows in `tickets` at
+        # fix time were written by this bug after the 2026-08-10 cleanup
+        # and were deleted (see git history / EDB board for that cleanup).
+        # tickets_fetcher.py/invoice_fetcher.py still support direct manual
+        # invocation if ever needed again; this only stops the automatic
+        # recurring fetch, same pattern as odoo above.
     ]:
         task_issue_id = start_source_task(parent_issue_id, name)
         try:
