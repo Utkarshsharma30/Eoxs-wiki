@@ -9,7 +9,8 @@ ingestion/
   server.py                   261  FastAPI app: webhooks + manual trigger + sweep entrypoint
   gmail_fetcher.py             321  Gmail (accounts are DB-backed, see oauth_gmail.py)
   oauth_gmail.py                 -  self-serve OAuth connect flow (mints invite links, exchanges tokens)
-  zoho_fetcher.py               304  Zoho Mail (shared support inbox)
+  zoho_fetcher.py               304  Zoho Mail (accounts are DB-backed, see oauth_zoho.py)
+  oauth_zoho.py                   -  self-serve OAuth connect flow for Zoho (mirrors oauth_gmail.py)
   fireflies_fetcher.py          326  Fireflies (call transcripts)
   fathom_fetcher.py             297  Fathom (call recordings)
   odoo_fetcher.py                400  Per-client implementation Kanban boards (6 clients)
@@ -77,11 +78,24 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
 - **Pagination**: pages of up to 100, following `nextPageToken` until exhausted or `limit` hit.
 - Retries via `retry.py` (`GMAIL_NUM_RETRIES=8`). Attachments are metadata-only.
 
-### Zoho (`zoho_fetcher.py`) — shared support inbox
+### Zoho (`zoho_fetcher.py`) — accounts are DB-backed (`oauth_accounts`, since 2026-08-12)
 
 - **API**: Zoho Mail REST, `/api/accounts/{account_id}/messages/search`.
-- **Auth**: OAuth2 refresh token, access token cached in-memory, auto-refreshed on 401.
-- **Entry point**: `process_zoho(*, dry_run, limit, safety_overlap_days, classify)`.
+- **Auth**: same `oauth_accounts` pattern Gmail uses (`load_accounts()`, `client_type` picking
+  `ZOHO_CLIENT_ID`/`SECRET` for `'legacy'` accounts vs `ZOHO_WEB_CLIENT_ID`/`SECRET` for `'web'`
+  ones) — access token cached in-memory per `ZohoClient` instance, auto-refreshed on 401. Unlike
+  Gmail, each account also carries `external_account_id` — Zoho's numeric per-mailbox identifier,
+  required to build API URLs (`/accounts/{external_account_id}/...`); Gmail's API has no
+  equivalent since it implicitly scopes to "me" via the token.
+- **Connecting a new account**: `ingestion/oauth_zoho.py` — same one-click self-serve flow as
+  Gmail's (`ingestion/oauth_gmail.py`), `python -m ingestion.oauth_zoho invite <account_label>
+  <display_name>`. One difference: right after the token exchange, the callback auto-discovers
+  `external_account_id` via `GET /api/accounts` (no library equivalent to
+  `google-auth-oauthlib`, so this is hand-rolled with `httpx` — deliberately **no PKCE**, since
+  nothing here auto-enables it the way that library did for Gmail, which is what caused the
+  "Missing code verifier" bug during the Gmail rollout). Current accounts: `support_zoho`
+  (`client_type='legacy'`).
+- **Entry point**: `process_zoho(account, *, dry_run, limit, safety_overlap_days, classify)`.
 - **Incremental fetch**: cursor converted to epoch-ms and applied **client-side** — Zoho's server-side date filters were found unreliable.
 - **Pagination**: offset paging, `PAGE_SIZE=200`.
 - Attachment info requires a separate API call even when `hasAttachment` is set (and that field is the *string* `"1"`/`"0"`, not a bool — a real gotcha noted directly in the code).

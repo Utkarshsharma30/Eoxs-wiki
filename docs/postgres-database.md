@@ -35,6 +35,10 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 023 | `023_mcp_redaction_log.sql` | `mcp_redaction_log` — audit trail for every time the MCP server's query-time redaction safety net actually strips content (see `docs/backend-server.md` §5). |
 | 024 | `024_email_attachment_extraction.sql` | Adds `source_attachment_id`, `mimetype`, `extracted_text` to `email_attachments` — closes the gap where attachment content was structurally invisible to every MCP tool. |
 | 026 | `026_oauth_accounts.sql` | `oauth_accounts` (per-account Gmail refresh tokens, replaces hardcoded `.env` triplets) + `oauth_connect_tokens` (single-use expiring self-serve connect links). See `docs/raw-ingestion.md` §2 Gmail and `ingestion/oauth_gmail.py`. |
+| 027 | `027_oauth_client_type.sql` | `oauth_accounts.client_type` — which registered OAuth client (Desktop vs Web app, or the Zoho equivalent) a given account's refresh_token belongs to. |
+| 028 | `028_oauth_pkce_verifier.sql` | `oauth_connect_tokens.code_verifier` — persists the PKCE verifier between the /connect and /callback requests (Gmail's self-serve flow only; Zoho's hand-rolled flow doesn't use PKCE). |
+| 029 | `029_oauth_accounts_zoho.sql` | Generalizes `oauth_accounts` for Zoho: adds `external_account_id` (Zoho's numeric per-mailbox identifier), relaxes `client_type`'s CHECK constraint to free text. |
+| 030 | `030_source_account_text.sql` | Converts `email_threads.source_account` from a fixed enum to `TEXT` — a rigid enum meant every new self-serve-connected account needed a schema migration before its first write. |
 
 ## 2. Every table, grouped logically
 
@@ -48,7 +52,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Calls:** `call_transcripts`, `call_segments`
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
 - **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
-- **Connected-account credentials:** `oauth_accounts` (per-account Gmail refresh tokens — `gmail_fetcher.py`'s `load_accounts()` reads this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
+- **Connected-account credentials:** `oauth_accounts` (per-account Gmail *and Zoho* refresh tokens — `gmail_fetcher.py`/`zoho_fetcher.py`'s `load_accounts()` read this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled; `external_account_id` is Zoho-only, its numeric per-mailbox identifier; `client_type` picks which registered OAuth client to refresh against), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback; `code_verifier` is Gmail-flow-only, PKCE). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
 
 A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
@@ -59,7 +63,7 @@ No `CHECK` constraints exist anywhere — `access_tier` is enforced purely as a 
 
 **`access_tier` enum**, exact values in ordinal order: `tier1`, `tier2_confidential`, `tier2`. (`tier2_confidential` sorts *before* `tier2` in ordinal position because it was added via `ALTER TYPE ... ADD VALUE 'tier2_confidential' AFTER 'tier1'` — don't rely on alphabetical/ordinal sort implying anything about restrictiveness.)
 
-Other enums: `call_source` (`fireflies`, `fathom`), `email_source_account` (`raj_gmail`, `ron_gmail`, `remya_gmail`, `support_zoho`), `wiki_flag_type` (`contradiction`, `unverified`), `wiki_page_type` (`entity`, `concept`, `source`, `analysis`, `overview`, `prospect`).
+Other enums: `call_source` (`fireflies`, `fathom`), `wiki_flag_type` (`contradiction`, `unverified`), `wiki_page_type` (`entity`, `concept`, `source`, `analysis`, `overview`, `prospect`). (`email_source_account` existed here until schema/030 converted `email_threads.source_account` to plain `TEXT` — a fixed enum meant every new self-serve-connected account needed its own migration before its first write.)
 
 Per-table structure (columns, types, keys) as it exists right now:
 
@@ -70,7 +74,7 @@ clients: id serial PK, slug text UNIQUE NOT NULL, display_name text NOT NULL,
 contacts: id serial PK, client_id int FK->clients, name text NOT NULL, email text,
   is_relay_inbox bool DEFAULT false, created_at/updated_at timestamptz
 
-email_threads: id serial PK, source_account email_source_account NOT NULL,
+email_threads: id serial PK, source_account text NOT NULL,
   gmail_thread_id text NOT NULL, subject/from_addr/to_addr text, message_count int,
   participants text[], thread_dates timestamptz[], tags text[], is_quarantined bool,
   generated_at timestamptz, source_file_path text NULL, client_id int FK->clients,

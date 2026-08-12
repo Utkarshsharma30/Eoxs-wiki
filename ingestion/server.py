@@ -45,7 +45,8 @@ from fastapi.responses import JSONResponse
 
 from ingestion.gmail_fetcher import process_account as gmail_process_account, load_accounts as load_gmail_accounts
 from ingestion.oauth_gmail import router as oauth_router
-from ingestion.zoho_fetcher import process_zoho
+from ingestion.oauth_zoho import router as oauth_zoho_router
+from ingestion.zoho_fetcher import process_zoho, load_accounts as load_zoho_accounts
 from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
@@ -64,6 +65,7 @@ WEBHOOK_SECRET = os.environ.get("INGESTION_WEBHOOK_SECRET", "")
 
 app = FastAPI(title="eoxs-wiki-db Raw Ingestion Server", version="1.0.0")
 app.include_router(oauth_router)
+app.include_router(oauth_zoho_router)
 
 _sweep_lock = asyncio.Lock()
 _last_run = {"time": None, "status": None, "source": None, "counts": None}
@@ -102,6 +104,19 @@ def run_gmail_all():
     return counts
 
 
+def run_zoho_all():
+    # Same DB-backed pattern as run_gmail_all() -- support_zoho today, any
+    # future self-serve-connected Zoho account picked up automatically.
+    counts = {}
+    for account in load_zoho_accounts(raw_sweep_only=True):
+        try:
+            counts[account] = process_zoho(account)
+        except Exception as e:
+            logger.error("zoho account=%s failed: %s", account, e)
+            counts[account] = {"error": str(e)}
+    return counts
+
+
 def run_full_sweep():
     """Every source, once. Used by the daily cron fallback and /trigger/manual.
 
@@ -118,7 +133,7 @@ def run_full_sweep():
     summary = {}
     for name, fn in [
         ("gmail", run_gmail_all),
-        ("zoho", process_zoho),
+        ("zoho", run_zoho_all),
         ("fireflies", process_fireflies),
         ("fathom", process_fathom),
         # "odoo" (per-client implementation-task Kanban fetch) removed

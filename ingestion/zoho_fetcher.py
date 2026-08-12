@@ -6,7 +6,15 @@ except Spam/Trash), client-side date filtering (Zoho's fromDate/toDate
 search operators are unreliable per the original pipeline's notes), and
 a two-step fetch (cheap list, then per-message content).
 
-Usage: python -m ingestion.zoho_fetcher [--dry-run] [--limit N]
+Accounts are DB-backed (oauth_accounts table, source_type='zoho', see
+schema/029_oauth_accounts_zoho.sql and ingestion/oauth_zoho.py), same
+pattern gmail_fetcher.py uses -- a newly-connected account (via the
+self-serve OAuth flow) is picked up with no code or .env change. Unlike
+Gmail, each Zoho account carries its own `external_account_id` (Zoho's
+numeric per-mailbox identifier, required to build API URLs) alongside its
+refresh_token, since Zoho's API has no "me" equivalent to scope to.
+
+Usage: python -m ingestion.zoho_fetcher --account support_zoho [--dry-run] [--limit N]
 """
 import argparse
 import base64
@@ -38,15 +46,55 @@ MAX_ATTACHMENT_DOWNLOAD_BYTES = 50 * 1024 * 1024  # matches the old vault pipeli
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.zoho")
 
-SOURCE = "support_zoho"
 ACCOUNTS_BASE = "https://accounts.zoho.com"
 MAIL_API_BASE = "https://mail.zoho.com/api"
-# Not a secret -- Zoho's numeric mail-account identifier, same value as
-# tools/config.yaml's zoho.account_id in the file-based pipeline.
-ZOHO_ACCOUNT_ID = "5146160000000008002"
 DEFAULT_MAX_RESULTS = 20000
 DEFAULT_SAFETY_OVERLAP_DAYS = 2
 PAGE_SIZE = 200
+
+
+def load_accounts(raw_sweep_only=False):
+    """Returns {account_label: display_name} for active oauth_accounts rows
+    (source_type='zoho'). Mirrors gmail_fetcher.load_accounts()."""
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            sql = "SELECT account_label, display_name FROM oauth_accounts WHERE source_type = 'zoho' AND status = 'active'"
+            if raw_sweep_only:
+                sql += " AND raw_sweep_enabled = true"
+            cur.execute(sql)
+            return {row["account_label"]: row["display_name"] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _load_account_credentials(account):
+    """Returns (refresh_token, external_account_id, client_id, client_secret).
+    client_type picks which registered Zoho OAuth client to refresh
+    against -- 'legacy' for support_zoho (whatever client it was already
+    using before this table existed), 'web' for anything connected via
+    oauth_zoho.py's self-serve flow. Mirrors gmail_fetcher.py's
+    _load_account_credentials(); see schema/029_oauth_accounts_zoho.sql."""
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT refresh_token, client_type, external_account_id FROM oauth_accounts "
+                "WHERE account_label = %s AND source_type = 'zoho' AND status = 'active'",
+                (account,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"no active oauth_accounts row for {account!r} -- connect it first (ingestion/oauth_zoho.py)")
+    if row["client_type"] == "legacy":
+        client_id = os.environ["ZOHO_CLIENT_ID"]
+        client_secret = os.environ["ZOHO_CLIENT_SECRET"]
+    else:
+        client_id = os.environ["ZOHO_WEB_CLIENT_ID"]
+        client_secret = os.environ["ZOHO_WEB_CLIENT_SECRET"]
+    return row["refresh_token"], row["external_account_id"], client_id, client_secret
 
 
 def _is_retryable(e):
@@ -69,9 +117,16 @@ def _retry_after(e):
 
 
 class ZohoClient:
-    def __init__(self):
-        # Every Zoho Mail API endpoint is scoped under /accounts/{account_id}/.
-        self.account_id = ZOHO_ACCOUNT_ID
+    def __init__(self, account):
+        # Every Zoho Mail API endpoint is scoped under /accounts/{account_id}/
+        # -- Zoho's numeric per-mailbox identifier, distinct from `account`
+        # (our own account_label string, e.g. "support_zoho"/"isha_zoho").
+        self.account_label = account
+        refresh_token, account_id, client_id, client_secret = _load_account_credentials(account)
+        self.refresh_token = refresh_token
+        self.account_id = account_id
+        self.client_id = client_id
+        self.client_secret = client_secret
         self._access_token = None
         self._client = httpx.Client(timeout=30.0)
 
@@ -80,9 +135,9 @@ class ZohoClient:
             resp = self._client.post(
                 f"{ACCOUNTS_BASE}/oauth/v2/token",
                 data={
-                    "refresh_token": os.environ["ZOHO_REFRESH_TOKEN"],
-                    "client_id": os.environ["ZOHO_CLIENT_ID"],
-                    "client_secret": os.environ["ZOHO_CLIENT_SECRET"],
+                    "refresh_token": self.refresh_token,
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
                     "grant_type": "refresh_token",
                 },
             )
@@ -194,18 +249,18 @@ def build_thread_groups(messages):
     return groups
 
 
-def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
+def process_zoho(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
                   safety_overlap_days=DEFAULT_SAFETY_OVERLAP_DAYS, classify=True):
-    client = ZohoClient()
-    since = sync_since(SOURCE, safety_overlap_days)
+    client = ZohoClient(account)
+    since = sync_since(account, safety_overlap_days)
     after_epoch_ms = int(since.timestamp() * 1000) if since else 0
-    logger.info("source=%s since=%s limit=%d dry_run=%s", SOURCE, since, limit, dry_run)
+    logger.info("account=%s since=%s limit=%d dry_run=%s", account, since, limit, dry_run)
 
     messages = client.list_all_messages(after_epoch_ms, limit)
-    logger.info("source=%s candidate messages=%d", SOURCE, len(messages))
+    logger.info("account=%s candidate messages=%d", account, len(messages))
 
     thread_groups = build_thread_groups(messages)
-    logger.info("source=%s candidate threads=%d", SOURCE, len(thread_groups))
+    logger.info("account=%s candidate threads=%d", account, len(thread_groups))
 
     counts = {"written": 0, "skipped_stale": 0, "skipped_spam": 0, "skipped_seen": 0, "error": 0, "written_items": []}
     run_started_at = now_utc()
@@ -222,7 +277,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
 
             conn = get_live_conn()
             try:
-                existing_count = existing_message_count(conn, SOURCE, thread_id)
+                existing_count = existing_message_count(conn, account, thread_id)
             finally:
                 conn.close()
             if existing_count is not None and existing_count >= len(msgs):
@@ -288,7 +343,7 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             if classify:
                 if not is_eoxs_relevant(subject, first_body):
                     counts["skipped_spam"] += 1
-                    mark_messages_seen(message_ids, SOURCE)
+                    mark_messages_seen(message_ids, account)
                     continue
 
             if dry_run:
@@ -301,18 +356,18 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             tier_context = f"Email subject: {subject}\nBody (truncated):\n{first_body}"
             dual_write(
                 write_thread,
-                source_account=SOURCE, gmail_thread_id=thread_id,
+                source_account=account, gmail_thread_id=thread_id,
                 subject=subject, from_addr=msgs[0].get("fromAddress"),
                 to_addr=msgs[0].get("toAddress"),
                 message_count=len(msgs), participants=participants,
                 thread_dates=[m["message_date"] for m in msg_records if m["message_date"]],
-                tags=["email", SOURCE], is_quarantined=False, generated_at=now_utc(),
+                tags=["email", account], is_quarantined=False, generated_at=now_utc(),
                 messages=msg_records,
                 attachments_by_message_index=attachments_by_message_index,
                 client_id=classify_client(client_index, participants),
                 access_tier=classify_tier(tier_context),
             )
-            mark_messages_seen(message_ids, SOURCE)
+            mark_messages_seen(message_ids, account)
             counts["written"] += 1
             counts["written_items"].append(subject)
 
@@ -321,20 +376,24 @@ def process_zoho(*, dry_run=False, limit=DEFAULT_MAX_RESULTS,
             counts["error"] += 1
 
     if not dry_run:
-        set_last_synced_at(SOURCE, run_started_at)
+        set_last_synced_at(account, run_started_at)
 
-    logger.info("source=%s done: %s", SOURCE, counts)
+    logger.info("account=%s done: %s", account, counts)
     return counts
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--account", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=DEFAULT_MAX_RESULTS)
     parser.add_argument("--no-classify", action="store_true")
     args = parser.parse_args()
 
-    process_zoho(dry_run=args.dry_run, limit=args.limit, classify=not args.no_classify)
+    if args.account not in load_accounts():
+        parser.error(f"{args.account!r} is not a connected, active zoho account in oauth_accounts")
+
+    process_zoho(args.account, dry_run=args.dry_run, limit=args.limit, classify=not args.no_classify)
 
 
 if __name__ == "__main__":

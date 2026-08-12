@@ -1,0 +1,15 @@
+-- email_threads.source_account was a fixed Postgres ENUM (email_source_account:
+-- raj_gmail/ron_gmail/remya_gmail/support_zoho) -- found while wiring up the
+-- self-serve OAuth connect flow: isha_gmail (already connected) isn't a
+-- member, so any real write for her would fail at the DB level, and every
+-- future self-serve-connected account (Gmail or Zoho) would hit the same
+-- wall. That directly contradicts the whole point of the self-serve flow --
+-- a new account should need zero schema changes to start flowing data.
+-- oauth_accounts.account_label is now the actual registry of valid accounts
+-- (enforced at connect-time), making the enum's validation redundant as
+-- well as actively harmful here. Existing enum values are plain strings
+-- already, so this is a lossless type change.
+ALTER TABLE email_threads ALTER COLUMN source_account TYPE TEXT;
+-- email_source_account type itself is intentionally left in place, unused --
+-- dropping it is a separate, deliberately-confirmed step (see git history),
+-- not bundled into this migration.

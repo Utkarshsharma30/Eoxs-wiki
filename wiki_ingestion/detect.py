@@ -20,18 +20,17 @@ import hashlib
 
 from ingestion.db import get_live_conn
 from ingestion.gmail_fetcher import load_accounts as load_gmail_accounts
+from ingestion.zoho_fetcher import load_accounts as load_zoho_accounts
 from ingestion.state import now_utc
 
 
 def email_accounts():
-    """Gmail accounts are DB-backed (oauth_accounts) as of 2026-08 -- a
-    newly self-serve-connected account shows up here with no code change.
-    support_zoho isn't an oauth_accounts row (separate source, own
-    fetcher) so it's appended statically. Includes accounts with
+    """Gmail AND Zoho accounts are both DB-backed (oauth_accounts) as of
+    2026-08 -- a newly self-serve-connected account (either source) shows
+    up here with no code change. Includes accounts with
     raw_sweep_enabled=false too (e.g. remya_gmail) -- harmless to keep
-    scanning a source that just never produces new rows, and matches this
-    list's previous hardcoded behavior."""
-    return list(load_gmail_accounts()) + ["support_zoho"]
+    scanning a source that just never produces new rows."""
+    return list(load_gmail_accounts()) + list(load_zoho_accounts())
 
 
 def _hash_content(*parts):
