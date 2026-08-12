@@ -29,12 +29,13 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   `docs/backend-server.md` §5 for exact category names.
 - **Tickets and invoices are gone from every MCP tool** (`get_ticket`/`search_tickets`/
   `get_invoice`/`search_invoices` removed 2026-08-10) — that data now lives only in the
-  separate `eoxs-teams` Odoo connector. **17 read-only tools remain, present for every
-  identity.**
+  separate `eoxs-teams` Odoo connector. **20 read-only tools remain, present for every
+  identity** (17 original + `list_assets`/`search_assets`/`get_asset`, added 2026-08-12
+  alongside the new `assets` table — see `docs/raw-ingestion.md` §2 Assets).
 - **Employee directory added 2026-08-12** (`employees` table + `mcp_server/employees.py`)
   — this server's first-ever write path. 7 tools (list/search/get + create/update/
   deactivate/reactivate_employee), gated to the `full` (Raj) and `hr` (Isha) identities
-  only — **24 tools total** for those two, still 17 for `general`/`intern`. Soft-delete
+  only — **27 tools total** for those two, still 20 for `general`/`intern`. Soft-delete
   only (`status` active/inactive, never a real `DELETE`); every write audited to
   `employee_change_log`. Deliberately outside the tiered-content system (no `access_tier`
   column) and outside the wiki-ingestion pipeline entirely — see `docs/backend-server.md`

@@ -251,6 +251,42 @@ def get_call(identifier, clearance=FULL_CLEARANCE):
     return call
 
 
+def list_assets(clearance=FULL_CLEARANCE):
+    return db_query(
+        "SELECT id, slug, title, access_tier, updated_at FROM assets WHERE access_tier::text = ANY(%s) ORDER BY title",
+        (clearance,),
+    )
+
+
+def search_assets(query, clearance=FULL_CLEARANCE):
+    """ILIKE, not full-text -- like search_implementation_tasks, this table
+    has no tsvector column (a handful of long documents, not worth the
+    machinery full-text search on emails/calls/wiki needs)."""
+    return db_query(
+        """SELECT id, slug, title, access_tier
+           FROM assets
+           WHERE (title ILIKE %s OR body ILIKE %s) AND access_tier::text = ANY(%s)
+           ORDER BY title LIMIT 20""",
+        (f"%{query}%", f"%{query}%", clearance),
+    )
+
+
+def get_asset(identifier, clearance=FULL_CLEARANCE):
+    """identifier: the row's numeric id, or its slug (from list_assets/
+    search_assets, or wiki_pages.sources_raw / wiki_citations.source_ref_raw
+    on any wiki page citing this document) -- either works. Unlike
+    get_email/get_call there's no legacy source_file_path lookup path;
+    this table has no historical file-based load, only the one-time
+    import from raj-wiki-vault (see ingestion/import_assets.py)."""
+    if str(identifier).isdigit():
+        row = db_query_one("SELECT * FROM assets WHERE id = %s AND access_tier::text = ANY(%s)", (int(identifier), clearance))
+    else:
+        row = db_query_one("SELECT * FROM assets WHERE slug = %s AND access_tier::text = ANY(%s)", (identifier, clearance))
+    if not row:
+        return {"error": f"no asset matching '{identifier}'"}
+    return row
+
+
 def list_clients():
     return db_query("SELECT id, slug, display_name, domains, odoo_base_url FROM clients ORDER BY display_name")
 
@@ -443,6 +479,7 @@ def get_implementation_task(task_id, clearance=FULL_CLEARANCE):
 TIER_FILTERED_TOOLS = {
     "get_index", "get_wiki_page", "search_wiki", "list_emails", "search_emails", "get_email", "get_attachment_text",
     "list_calls", "search_calls", "get_call",
+    "list_assets", "search_assets", "get_asset",
     "get_client_profile", "get_client_file", "list_implementation_tasks", "search_implementation_tasks",
     "get_implementation_task",
 }
@@ -458,6 +495,9 @@ TOOLS = {
     "list_calls": list_calls,
     "search_calls": search_calls,
     "get_call": get_call,
+    "list_assets": list_assets,
+    "search_assets": search_assets,
+    "get_asset": get_asset,
     "list_clients": list_clients,
     "list_contacts": list_contacts,
     "get_client_profile": get_client_profile,
@@ -531,6 +571,29 @@ def _tool_defs(enable_employee_tools=False):
                         "search_calls result. Also accepts a legacy source_file_path string, but every "
                         "live-ingested (Fireflies/Fathom) call has a NULL source_file_path -- use 'id' for "
                         "those, which is always present.",
+            inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
+        ),
+        Tool(
+            name="list_assets",
+            description="List curated internal reference documents (SOPs, company overview, ICP, salary "
+                        "register, product-feature specs, technical references) -- the raw source behind wiki "
+                        "pages under wiki/sources/assets/. Title/id/slug only, not full body -- use get_asset "
+                        "for that.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="search_assets",
+            description="Search internal reference documents by title or body content (substring match, not "
+                        "full-text). Use list_assets for the full catalog instead.",
+            inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        ),
+        Tool(
+            name="get_asset",
+            description="Return the full raw text of one internal reference document by its numeric 'id' "
+                        "(from list_assets/search_assets) or its 'slug' (also the value in a citing wiki page's "
+                        "sources_raw). This is the actual source document — the corresponding wiki page under "
+                        "wiki/sources/assets/ is a synthesized summary, not the raw text; use this tool when the "
+                        "full original wording matters (e.g. exact SOP steps, exact salary figures).",
             inputSchema={"type": "object", "properties": {"identifier": {"type": "string"}}, "required": ["identifier"]},
         ),
         Tool(
