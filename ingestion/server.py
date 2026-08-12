@@ -8,12 +8,12 @@ go straight to Postgres via dual_write(), not a markdown file + git push.
 
 Each webhook handler calls only the relevant fetcher(s) for that source
 (not a blanket full-sweep like the old pipeline) -- Gmail webhooks fetch
-all 3 Gmail accounts (Pub/Sub push doesn't cheaply map emailAddress to a
-specific account without hardcoding real addresses, and a fetch is cheap/
-idempotent via cursor+dedup when there's nothing new), Fireflies/Fathom
-webhooks fetch just that source. Zoho and Odoo have no webhook in this
-system (same as the old pipeline) -- they, and everything else, get
-picked up by the daily full-sweep cron fallback.
+every raw_sweep_enabled account in oauth_accounts (Pub/Sub push doesn't
+cheaply map emailAddress to a specific account without hardcoding real
+addresses, and a fetch is cheap/idempotent via cursor+dedup when there's
+nothing new), Fireflies/Fathom webhooks fetch just that source. Zoho and
+Odoo have no webhook in this system (same as the old pipeline) -- they,
+and everything else, get picked up by the daily full-sweep cron fallback.
 
 This module is the ingestion server's CODE. Actually exposing it to the
 public internet (reverse proxy, TLS, DNS, registering the webhook URLs
@@ -43,7 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ingestion.gmail_fetcher import process_account as gmail_process_account, ACCOUNTS as GMAIL_ACCOUNTS
+from ingestion.gmail_fetcher import process_account as gmail_process_account, load_accounts as load_gmail_accounts
+from ingestion.oauth_gmail import router as oauth_router
 from ingestion.zoho_fetcher import process_zoho
 from ingestion.fireflies_fetcher import process_fireflies
 from ingestion.fathom_fetcher import process_fathom
@@ -62,6 +63,7 @@ FATHOM_WEBHOOK_SECRET = os.environ.get("FATHOM_WEBHOOK_SECRET", "")
 WEBHOOK_SECRET = os.environ.get("INGESTION_WEBHOOK_SECRET", "")
 
 app = FastAPI(title="eoxs-wiki-db Raw Ingestion Server", version="1.0.0")
+app.include_router(oauth_router)
 
 _sweep_lock = asyncio.Lock()
 _last_run = {"time": None, "status": None, "source": None, "counts": None}
@@ -84,15 +86,14 @@ def _verify_svix(secret, svix_id, svix_timestamp, body, svix_signature):
 
 
 def run_gmail_all():
+    # Accounts are DB-backed now (oauth_accounts, raw_sweep_enabled column) --
+    # remya_gmail's 2026-08-10 exclusion from the recurring sweep (one-time
+    # historical pull only, not an ongoing source) is expressed there as
+    # raw_sweep_enabled=false rather than a hardcoded name check here. A newly
+    # self-serve-connected account (raw_sweep_enabled defaults true) is
+    # included automatically, no code change.
     counts = {}
-    for account in GMAIL_ACCOUNTS:
-        # 2026-08-10: remya_gmail deliberately excluded from the recurring
-        # sweep -- one-time-only historical data per explicit instruction,
-        # not an ongoing source. gmail_fetcher.py still supports it directly
-        # (python -m ingestion.gmail_fetcher --account remya_gmail) if ever
-        # needed again; this only stops the automatic recurring fetch.
-        if account == "remya_gmail":
-            continue
+    for account in load_gmail_accounts(raw_sweep_only=True):
         try:
             counts[account] = gmail_process_account(account)
         except Exception as e:

@@ -7,7 +7,8 @@
 ```
 ingestion/
   server.py                   261  FastAPI app: webhooks + manual trigger + sweep entrypoint
-  gmail_fetcher.py             321  Gmail (3 accounts)
+  gmail_fetcher.py             321  Gmail (accounts are DB-backed, see oauth_gmail.py)
+  oauth_gmail.py                 -  self-serve OAuth connect flow (mints invite links, exchanges tokens)
   zoho_fetcher.py               304  Zoho Mail (shared support inbox)
   fireflies_fetcher.py          326  Fireflies (call transcripts)
   fathom_fetcher.py             297  Fathom (call recordings)
@@ -37,10 +38,24 @@ ingestion/
 
 Every fetcher shares the same overall shape: connect → figure out what's new since last time → fetch it (with pagination) → classify it (spam/relevance filter, then access-tier) → `dual_write()` it → advance the cursor.
 
-### Gmail (`gmail_fetcher.py`) — 3 accounts
+### Gmail (`gmail_fetcher.py`) — accounts are DB-backed (`oauth_accounts`, since 2026-08-12)
 
 - **API**: Gmail API v1, `users().threads().list()` + `.get(format="full")`.
-- **Auth**: one OAuth2 refresh-token triplet per account (`{PREFIX}_CLIENT_ID/SECRET/REFRESH_TOKEN`). `ACCOUNTS = {"raj_gmail": "RAJ_GMAIL", "ron_gmail": "RON_GMAIL", "remya_gmail": "REMYA_GMAIL"}`.
+- **Auth**: accounts live in the `oauth_accounts` table (schema/026_oauth_accounts.sql), not hardcoded
+  `.env` triplets — `load_accounts(raw_sweep_only=False)` returns `{account_label: display_name}` for
+  every `status='active'` row, `raw_sweep_only=True` additionally filters to `raw_sweep_enabled=true`
+  (what the recurring sweep iterates). `client_id`/`client_secret` are still shared across every
+  account (`GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET` in `.env`, one OAuth app); only
+  `refresh_token` is per-account and lives in the DB row.
+- **Connecting a new account**: `ingestion/oauth_gmail.py` — `python -m ingestion.oauth_gmail invite
+  <account_label> <display_name>` mints a single-use, expiring link (`oauth_connect_tokens` table).
+  The account owner opens it, logs into Google directly (never sees our system, never types a
+  password into anything we control), approves `gmail.readonly` access. Google redirects to
+  `/oauth/gmail/callback` (mounted in `ingestion/server.py`), which exchanges the code for a refresh
+  token server-side and upserts the `oauth_accounts` row — no `.env` edit, no service restart. The
+  account is picked up by the very next sweep automatically. Current accounts: `raj_gmail`, `ron_gmail`
+  (both `raw_sweep_enabled=true`), `remya_gmail` (`raw_sweep_enabled=false` — 2026-08-10, one-time
+  historical pull only, not an ongoing source).
 - **Entry point**: `process_account(account, *, dry_run, limit, safety_overlap_days, classify)`.
 - **Incremental fetch**: `sync_since(account, safety_overlap_days)` → Gmail search query `after:YYYY/MM/DD`. Cursor advances via `set_last_synced_at()` on success.
 - **Pagination**: pages of up to 100, following `nextPageToken` until exhausted or `limit` hit.
@@ -191,7 +206,7 @@ Straight from `ingestion/server.py`'s own docstring: *"Zoho and Odoo have no web
 
 | Source | Real-time webhook? | Fallback |
 |---|---|---|
-| Gmail (all 3 accounts) | Yes — Google Cloud Pub/Sub push, `/webhook/gmail` (refetches all 3 accounts, since the push payload doesn't cheaply map to one specific account) | 2-hour sweep |
+| Gmail (every `raw_sweep_enabled` account) | Yes — Google Cloud Pub/Sub push, `/webhook/gmail` (refetches every active account, since the push payload doesn't cheaply map to one specific account) | 2-hour sweep |
 | Fireflies | Yes — `transcript.completed`, `/webhook/fireflies`, HMAC-SHA256-verified if `FIREFLIES_WEBHOOK_SECRET` set | 2-hour sweep |
 | Fathom | Yes — `recording.completed`, `/webhook/fathom`, Svix-signature-verified if `FATHOM_WEBHOOK_SECRET` set | 2-hour sweep |
 | Zoho | **No** | 2-hour sweep only |

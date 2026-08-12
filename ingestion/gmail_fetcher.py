@@ -4,6 +4,13 @@ listing/pagination, num_retries=8 backoff, spam classification, dedup.
 Final write step is Postgres (ingestion.write_email) instead of a markdown
 file + git commit.
 
+Accounts are DB-backed (oauth_accounts table, see schema/026_oauth_accounts.sql
+and ingestion/oauth_gmail.py) rather than one hardcoded {PREFIX}_CLIENT_ID/
+SECRET/REFRESH_TOKEN triplet per account in .env -- a newly-connected account
+(via the self-serve OAuth flow) is picked up here with no code or .env change.
+client_id/client_secret remain shared across every account (GMAIL_OAUTH_CLIENT_ID/
+SECRET in .env, one OAuth app), only refresh_token is per-account and DB-stored.
+
 Usage: python -m ingestion.gmail_fetcher --account raj_gmail [--dry-run] [--limit N]
 """
 import argparse
@@ -38,11 +45,40 @@ MAX_ATTACHMENT_DOWNLOAD_BYTES = 50 * 1024 * 1024  # matches the old vault pipeli
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ingestion.gmail")
 
-ACCOUNTS = {
-    "raj_gmail": "RAJ_GMAIL",
-    "ron_gmail": "RON_GMAIL",
-    "remya_gmail": "REMYA_GMAIL",
-}
+def load_accounts(raw_sweep_only=False):
+    """Returns {account_label: display_name} for active oauth_accounts rows
+    (source_type='gmail'). raw_sweep_only=True additionally filters to
+    raw_sweep_enabled=true -- what run_gmail_all() should iterate; the
+    unfiltered form is for one-off manual runs (python -m
+    ingestion.gmail_fetcher --account remya_gmail still works even though
+    remya is excluded from the recurring sweep)."""
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            sql = "SELECT account_label, display_name FROM oauth_accounts WHERE source_type = 'gmail' AND status = 'active'"
+            if raw_sweep_only:
+                sql += " AND raw_sweep_enabled = true"
+            cur.execute(sql)
+            return {row["account_label"]: row["display_name"] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _load_refresh_token(account):
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT refresh_token FROM oauth_accounts WHERE account_label = %s AND source_type = 'gmail' AND status = 'active'",
+                (account,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"no active oauth_accounts row for {account!r} -- connect it first (ingestion/oauth_gmail.py)")
+    return row["refresh_token"]
+
 
 GMAIL_NUM_RETRIES = 8
 DEFAULT_MAX_RESULTS = 500
@@ -73,12 +109,11 @@ def _retry_after(e):
 
 
 def get_gmail_service(account):
-    prefix = ACCOUNTS[account]
     creds = Credentials(
         None,
-        refresh_token=os.environ[f"{prefix}_REFRESH_TOKEN"],
-        client_id=os.environ[f"{prefix}_CLIENT_ID"],
-        client_secret=os.environ[f"{prefix}_CLIENT_SECRET"],
+        refresh_token=_load_refresh_token(account),
+        client_id=os.environ["GMAIL_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["GMAIL_OAUTH_CLIENT_SECRET"],
         token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
     )
@@ -350,11 +385,14 @@ def process_account(account, *, dry_run=False, limit=DEFAULT_MAX_RESULTS,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--account", required=True, choices=list(ACCOUNTS.keys()))
+    parser.add_argument("--account", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=DEFAULT_MAX_RESULTS)
     parser.add_argument("--no-classify", action="store_true")
     args = parser.parse_args()
+
+    if args.account not in load_accounts():
+        parser.error(f"{args.account!r} is not a connected, active gmail account in oauth_accounts")
 
     process_account(
         args.account, dry_run=args.dry_run, limit=args.limit,

@@ -19,9 +19,19 @@ cheap and correct regardless of source.
 import hashlib
 
 from ingestion.db import get_live_conn
+from ingestion.gmail_fetcher import load_accounts as load_gmail_accounts
 from ingestion.state import now_utc
 
-EMAIL_ACCOUNTS = ["raj_gmail", "ron_gmail", "remya_gmail", "support_zoho"]
+
+def email_accounts():
+    """Gmail accounts are DB-backed (oauth_accounts) as of 2026-08 -- a
+    newly self-serve-connected account shows up here with no code change.
+    support_zoho isn't an oauth_accounts row (separate source, own
+    fetcher) so it's appended statically. Includes accounts with
+    raw_sweep_enabled=false too (e.g. remya_gmail) -- harmless to keep
+    scanning a source that just never produces new rows, and matches this
+    list's previous hardcoded behavior."""
+    return list(load_gmail_accounts()) + ["support_zoho"]
 
 
 def _hash_content(*parts):
@@ -248,7 +258,7 @@ def build_all_candidates(since_by_kind=None):
     since_by_kind = since_by_kind or {}
     partitions = {}
 
-    for account in EMAIL_ACCOUNTS:
+    for account in email_accounts():
         partitions[account] = candidates_email(account, since_by_kind.get(account))
 
     partitions["tickets"] = candidates_tickets(since_by_kind.get("tickets"))
@@ -269,7 +279,7 @@ def run_detection(cycle_id=None, advance_cursors=True):
     run_started_at = now_utc()
     partitions = {}
 
-    for account in EMAIL_ACCOUNTS:
+    for account in email_accounts():
         since = get_cursor(account)
         candidates = candidates_email(account, since)
         changed, skipped = filter_unchanged(account, candidates, cycle_id)

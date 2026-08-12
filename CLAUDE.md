@@ -30,6 +30,14 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 - **Tickets and invoices are gone from every MCP tool** (`get_ticket`/`search_tickets`/
   `get_invoice`/`search_invoices` removed 2026-08-10) — that data now lives only in the
   separate `eoxs-teams` Odoo connector. **17 tools remain.**
+- **Gmail accounts are now DB-backed, not hardcoded `.env` triplets** (`oauth_accounts` table,
+  2026-08-12) — `raj_gmail`/`ron_gmail`/`remya_gmail` migrated over unchanged (same behavior:
+  remya excluded from the recurring sweep via `raw_sweep_enabled=false`, not a name check
+  anymore). New accounts connect via a self-serve OAuth flow (`ingestion/oauth_gmail.py`,
+  `python -m ingestion.oauth_gmail invite <label> <name>`) — the account owner clicks a
+  one-time link, logs into Google directly (never sees our system, never types a password
+  anywhere we control), and is picked up by the next 2-hour sweep automatically, no `.env`
+  edit or restart needed. See `docs/raw-ingestion.md` §2 Gmail.
 - **Known, unresolved bug**: the recurring sweep still writes new rows to `tickets` despite
   the removal above — the fix never reached `tickets_fetcher.py`'s registration in the sweep
   itself. See `docs/raw-ingestion.md` §12. Real, live, growing — not just a doc gap.

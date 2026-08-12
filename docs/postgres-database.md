@@ -34,10 +34,11 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 022 | `022_invoices_live.sql` | Makes invoice-related columns nullable for live-only orders; adds `sales_order_events`, `invoices`, `invoice_lines`. |
 | 023 | `023_mcp_redaction_log.sql` | `mcp_redaction_log` — audit trail for every time the MCP server's query-time redaction safety net actually strips content (see `docs/backend-server.md` §5). |
 | 024 | `024_email_attachment_extraction.sql` | Adds `source_attachment_id`, `mimetype`, `extracted_text` to `email_attachments` — closes the gap where attachment content was structurally invisible to every MCP tool. |
+| 026 | `026_oauth_accounts.sql` | `oauth_accounts` (per-account Gmail refresh tokens, replaces hardcoded `.env` triplets) + `oauth_connect_tokens` (single-use expiring self-serve connect links). See `docs/raw-ingestion.md` §2 Gmail and `ingestion/oauth_gmail.py`. |
 
 ## 2. Every table, grouped logically
 
-**36 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**38 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
 - **Reference:** `clients`, `contacts`
 - **Emails:** `email_threads`, `email_messages`, `email_attachments`
@@ -47,6 +48,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Calls:** `call_transcripts`, `call_segments`
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
 - **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
+- **Connected-account credentials:** `oauth_accounts` (per-account Gmail refresh tokens — `gmail_fetcher.py`'s `load_accounts()` reads this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
 
 A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
