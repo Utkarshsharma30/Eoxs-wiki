@@ -1,6 +1,6 @@
 # Raw Data Ingestion
 
-*Deep technical reference for how Cruz (`eoxs-wiki-db`) fetches raw data from 9 external sources, classifies it, and stores it — for developers being onboarded to ingestion work.*
+*Deep technical reference for how Cruz (`eoxs-wiki-db`) fetches raw data from 9 external sources (plus one non-API category, `assets` — see §2), classifies it, and stores it — for developers being onboarded to ingestion work.*
 
 ## 1. The `ingestion/` directory
 
@@ -16,6 +16,7 @@ ingestion/
   odoo_fetcher.py                400  Per-client implementation Kanban boards (6 clients)
   tickets_fetcher.py             214  EOXS's own support tickets (central Odoo instance)
   invoice_fetcher.py             343  Sales orders + invoices (same central instance)
+  import_assets.py                 -  one-time backfill: curated internal reference docs (SOPs, etc.) -- not an ongoing fetcher, see §2
   write_email.py                101  email_threads/messages/attachments writer
   write_call.py                   84  call_transcripts/segments writer
   write_ticket.py                  77  tickets/events/attachments writer
@@ -33,7 +34,7 @@ ingestion/
   retry.py                          38  shared retry helper
   _check_env.py                     40  env-var-presence diagnostic (has some stale names — see §12)
 ```
-4,064 lines total, 23 files.
+4,064+ lines total, 27 files (line count not recomputed since oauth_gmail.py/oauth_zoho.py/import_assets.py were added — see git for exact current counts).
 
 ## 2. Each fetcher, in detail
 
@@ -161,6 +162,16 @@ Support tickets and invoices/sales-orders were deliberately removed from this sy
 - **Entry point**: `process_invoices(*, dry_run, limit, safety_overlap_days)`.
 - **Incremental fetch**: real cursor, `sale.order.write_date >= since`, `sync_cursors` source `"eoxs_invoices"`.
 - Ported from a second n8n workflow ("invoice wiki ingestion automation v4"). 185 historical rows pre-existed from an earlier file-based loader; they get "graduated" into live-maintained rows via upsert on `order_number` the first time Odoo reports a change — no duplication.
+
+### Assets (`import_assets.py`) — curated internal reference docs, NOT an ongoing fetcher
+
+Found 2026-08-12: `raj-wiki-vault`'s older file-based pipeline ingested a category of manually-curated internal reference documents (SOPs, company overview, ICP, salary register, product-feature specs, technical references) from `raw/assets/*.md` into `wiki/sources/assets/*.md` wiki pages. At some earlier point those 15 wiki pages were migrated into this database's `wiki_pages` table (`source_file_path` still literally reads `wiki/sources/assets/<title>.md`) — but the **raw layer never was**, unlike every other source category here. Their `wiki_citations` rows sat permanently `unresolved` (`source_id = NULL`) as a result, silently, since nothing ever surfaced it.
+
+- **Source**: `raj-wiki-vault/raw/assets/*.md` on this same box — 15 files, hand-maintained by the team, not an external API.
+- **Schema**: `assets` table (schema/031_assets.sql) — `slug` (matches `wiki_pages.sources_raw`/`wiki_citations.source_ref_raw`), `title`, `body`, `source_file_path` (provenance only), `access_tier` (classified **per-document** via `inline_tier_classifier.classify_tier()`, not applied uniformly — the salary register came back `tier2_confidential`, everything else `tier2`).
+- **Not an ongoing fetcher**: there's no external feed to poll. `python -m ingestion.import_assets` is a manual, re-runnable backfill (`ON CONFLICT` upsert on `slug`) — run it again after hand-editing one of the source files if you want the change picked up. `wiki_ingestion/detect.py`'s `candidates_assets()` partition exists so a re-run's changed `updated_at` gets detected by the normal wiki-ingestion cycle like any other source, once it happens.
+- **The filename→slug mapping isn't fully mechanical**: 12 of 15 files slugify directly from their filename, but `icp.md`/`sop.md`/`TECHNICAL.md` used more descriptive slugs when originally wiki-ingested (`eoxs-icp`/`eoxs-sop`/`eoxs-technical-sales-coach`) — verified by matching each file's actual content against the existing `wiki_pages.sources_raw` values, not guessable from the filename alone. See the hardcoded `FILENAME_TO_SLUG` map in `import_assets.py`.
+- **2 of the original 17 referenced slugs were never assets at all**: `sops-needed-by-monday-please-submit-your-draft` and `2021-05-28-eoxs-post-demo-sequencing-content` turned out to be **email** citations (`email_threads.id` 2647 and 23883 respectively — the second one's date prefix matches the thread's actual date) mistakenly assumed to be missing asset files. Resolved as `source_type='email_thread'`, not added to `assets`.
 
 ## 3. Writers (`write_*.py`)
 

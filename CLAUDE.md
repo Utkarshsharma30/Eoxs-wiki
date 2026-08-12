@@ -47,6 +47,21 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   one-time link, logs into Google directly (never sees our system, never types a password
   anywhere we control), and is picked up by the next 2-hour sweep automatically, no `.env`
   edit or restart needed. See `docs/raw-ingestion.md` §2 Gmail.
+- **The same self-serve OAuth pattern now covers Zoho too** (`ingestion/oauth_zoho.py`,
+  2026-08-12) — `support_zoho` migrated into `oauth_accounts` unchanged (`client_type='legacy'`).
+  New Zoho accounts connect the same one-link way Gmail's do, with one difference: Zoho requires
+  a per-mailbox `external_account_id`, auto-discovered via `GET /api/accounts` right after the
+  token exchange — nothing manual. Also: `email_threads.source_account` was a fixed Postgres
+  enum (only the 4 original accounts) — converted to plain `TEXT`, since a rigid enum meant every
+  future self-serve-connected account needed its own schema migration before it could write a
+  single row, defeating the point of self-serve. See `docs/raw-ingestion.md` §2 Zoho.
+- **New raw source category: `assets`** (curated internal reference docs — SOPs, company
+  overview, ICP, salary register — 2026-08-12) — found while investigating a user report that
+  this data "wasn't in the wiki": it *was*, wiki pages for all 15 were already here (migrated
+  from `raj-wiki-vault` at some earlier point), but the raw layer backing them never existed,
+  leaving their citations permanently unresolved. Backfilled via `ingestion/import_assets.py`
+  (manual, re-runnable — not an ongoing fetcher, no external feed for hand-curated docs). See
+  `docs/raw-ingestion.md` §2 Assets.
 - **RESOLVED 2026-08-12** (was listed here as unresolved): the recurring sweep no longer writes
   new rows to `tickets`/`invoices` — `run_full_sweep()`'s source list in `ingestion/server.py`
   never had `tickets_fetcher.py`/`invoice_fetcher.py` removed from it when those tools were
