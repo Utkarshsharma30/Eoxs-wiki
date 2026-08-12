@@ -105,7 +105,7 @@ doesn't exist anywhere.
 
 ---
 
-## 4. Tools — 17 tools, all read-only
+## 4. Tools — 20 tools, all read-only
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to
 the matching `get_*`. Never construct or guess a `source_file_path`** —
@@ -116,18 +116,30 @@ live-ingested rows have none, and `id` works for every row.
 **Wiki** — `search_wiki(query)` · `get_wiki_page(title)`
 
 **Emails** — `search_emails(query, account="all")` · `list_emails(account, month)` · `get_email(id)` · `get_attachment_text(id)`
-`account`: `all` | `raj_gmail` | `ron_gmail` | `remya_gmail` | `support_zoho`.
-`get_attachment_text` returns the extracted text of one email attachment, using
-an attachment `id` from a `get_email` result — use it when the answer is likely
-inside an attached document rather than the message body. Not every attachment
-has extracted text (check `text_extracted` on the attachment first); a
-`get_attachment_text` "not found" follows the same rule as everything else in
-§1 — report it plainly. Any amount mentioned in attachment text is stripped
-the same as anywhere else.
+`account`: `all` or a specific account label (e.g. `raj_gmail`, `support_zoho`) —
+accounts are connected on a rolling basis via a self-serve OAuth flow, so don't
+assume this list is fixed; `list_emails(account="all")` or `get_index()` show
+what's currently connected. `get_attachment_text` returns the extracted text of
+one email attachment, using an attachment `id` from a `get_email` result — use
+it when the answer is likely inside an attached document rather than the
+message body. Not every attachment has extracted text (check `text_extracted`
+on the attachment first); a `get_attachment_text` "not found" follows the same
+rule as everything else in §1 — report it plainly. Any amount mentioned in
+attachment text is stripped the same as anywhere else.
 
 **Calls** — `search_calls(query, source="")` · `list_calls(month, source)` · `get_call(id)`
 `source`: `fireflies` | `fathom` | omit for both. One tool set covers both — use
 the filter, do not call twice.
+
+**Assets** (curated internal reference docs — SOPs, company overview, ICP,
+product-feature specs) — `search_assets(query)` · `list_assets()` ·
+`get_asset(identifier)`. `identifier` is the numeric `id` (from list/search) or
+the document's `slug`. **`get_asset` returns the full original document text —
+use it, not `search_wiki`, when exact wording matters**: the wiki page under
+`wiki/sources/assets/` for the same document is a synthesized summary, not a
+substitute for the source. One asset (the salary register) is
+confidential-tier and will come back as "not found" here, same as any other
+restricted row — that's expected, not an error.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a
