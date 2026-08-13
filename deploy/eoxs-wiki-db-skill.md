@@ -10,7 +10,7 @@ shapes, and choosing the right one is most of the work.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, **plus the employee directory** | 27 tools: 20 read-only + 7 for the employee directory only (see §5.1) |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, **plus the employee directory** | 29 tools: 20 read-only + 7 employee-directory + 2 asset-document writes (see §5.1, §5.2) |
 | **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 | **teams-askcruz** | The askcruz Odoo project | Raw SQL console **+ 4 write tools** (8 total) |
 
@@ -39,8 +39,9 @@ wrong.
 | Correspondence, calls, client background, implementation/dev work, anything synthesized | **eoxs-db** |
 | Support tickets, invoices/sales orders, pipeline, CRM, prospects, deal stage | **eoxs-teams** — eoxs-db has none of this anymore (moved out 2026-08) |
 | The askcruz project specifically — its tasks, stages, assignees | **teams-askcruz** |
-| **Creating or changing a task** | **teams-askcruz** (write tools — see §5.2) |
+| **Creating or changing a task** | **teams-askcruz** (write tools — see §5.3) |
 | Who's currently employed, someone's department/title/manager, adding/updating/offboarding an employee | **eoxs-db** — the employee directory (see §5.1) |
+| Adding a new SOP/reference document, or updating an existing one (a new file uploaded, a corrected line/statement) | **eoxs-db** — `create_asset`/`update_asset` (see §5.2) |
 
 **For tickets/invoices/CRM/prospects/sales specifically: eoxs-db has no
 dedicated tools for these at all, but check it anyway first if the question
@@ -121,15 +122,16 @@ eoxs-db at all** (moved out 2026-08 — see §1). For any of those, query
 `eoxs-teams`.
 
 **eoxs-db has no save or notes tool**, and no write capability beyond the
-employee-directory tools (§5.1) — everything else on eoxs-db (wiki, emails,
-calls, implementation tasks, clients) is read-only. The other write surface,
-`teams-askcruz`'s task tools, is covered in §5.2.
+employee-directory tools (§5.1) and the two asset-document tools (§5.2) —
+everything else on eoxs-db (wiki, emails, calls, implementation tasks,
+clients) is read-only. The other write surface, `teams-askcruz`'s task
+tools, is covered in §5.3.
 
 ---
 
 ## 4. Tools
 
-### eoxs-db — 27 tools: 20 read-only + 7 employee-directory (read + write, §5.1)
+### eoxs-db — 29 tools: 20 read-only + 7 employee-directory + 2 asset-writes (§5.1, §5.2)
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to the
 matching `get_*`. Never construct or guess a `source_file_path`** — live-ingested
@@ -153,13 +155,17 @@ message body.
 the filter, do not call twice.
 
 **Assets** (curated internal reference docs — SOPs, company overview, ICP,
-salary register, product-feature specs) — `search_assets(query)` ·
+salary register, product-feature specs) — read: `search_assets(query)` ·
 `list_assets()` · `get_asset(identifier)`. `identifier` is the numeric `id`
 (from list/search) or the document's `slug`. **`get_asset` returns the full
 original document text — use it, not `search_wiki`, when exact wording
 matters** (precise SOP steps, exact salary figures): the wiki page under
 `wiki/sources/assets/` for the same document is a synthesized summary, not a
-substitute for the source.
+substitute for the source. `get_asset` also returns `change_history`.
+Write: `create_asset(slug, title, body)` · `update_asset(slug, body, title)`
+— read §5.2 before using either. Once written, the document flows into the
+wiki automatically on the next scheduled synthesis cycle (every 6 hours) —
+no separate "publish" step exists or is needed.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a
@@ -177,11 +183,12 @@ data here anymore — see §1.
 `search_employees(query_text, status="active")` · `get_employee(identifier)`
 `status`: `"active"` (default — current headcount) | `"inactive"` (people who
 left) | `"all"`. `get_employee` also returns `change_history` — every prior
-edit, who made it, and when. This is the **only** category of data on
-`eoxs-db` with any write capability at all — see §5.1 before using
+edit, who made it, and when. See §5.1 before using
 `create_employee`/`update_employee`/`deactivate_employee`/`reactivate_employee`.
-Every other eoxs-db tool listed above (wiki, emails, calls, clients,
-implementation tasks) remains fully read-only, with no exceptions.
+Employees and assets (above) are the **only two** categories of data on
+`eoxs-db` with any write capability at all — every other tool listed above
+(wiki, emails, calls, clients, implementation tasks) remains fully
+read-only, with no exceptions.
 
 ### eoxs-teams — 4 tools, read-only SQL
 
@@ -194,18 +201,18 @@ implementation tasks) remains fully read-only, with no exceptions.
 
 Same four SQL tools against the askcruz Odoo DB (`list_tables`,
 `describe_table`, `get_business_schema`, `query`), plus four **write** tools
-covered in §5.2.
+covered in §5.3.
 
 ---
 
 ## 5. Writes
 
-Two independent write surfaces exist across all three connectors — nowhere
-else. **No table, tool, or connector besides these two has any write
+Three independent write surfaces exist across all three connectors — nowhere
+else. **No table, tool, or connector besides these three has any write
 capability, full stop:** not wiki pages, not emails, not calls, not clients,
 not implementation tasks, not tickets/invoices/CRM on `eoxs-teams`. If it
-isn't one of the tools named in §5.1 or §5.2, it cannot create, change, or
-remove anything, regardless of how its name or description reads.
+isn't one of the tools named in §5.1, §5.2, or §5.3, it cannot create,
+change, or remove anything, regardless of how its name or description reads.
 
 ### 5.1 eoxs-db — employee directory only
 
@@ -230,7 +237,43 @@ history — there is no hard-delete tool anywhere).
 - `get_employee(identifier)`'s `change_history` shows every prior edit —
   check it before a correction if you're unsure what's already there.
 
-### 5.2 teams-askcruz — task writes, two-phase, and you must stop in between
+### 5.2 eoxs-db — internal reference documents (SOPs, salary register, etc.)
+
+`create_asset(slug, title, body)` and `update_asset(slug, body, title)` are
+the only other write tools `eoxs-db` has, alongside §5.1's employee tools —
+nothing else on this connector can write. Both write directly to the live
+`assets` table, immediately, no preview step.
+
+- **If someone says a SOP or reference document has a new version, or has
+  uploaded a file that should replace or amend one**: you are responsible
+  for reading/extracting the actual text yourself first (from the uploaded
+  file or pasted content) — neither tool accepts a raw file, only text. Then
+  call `update_asset(slug, body=<the extracted text>)` for an existing
+  document (look it up with `search_assets`/`get_asset` first if you don't
+  already have its `slug`), or `create_asset` for a genuinely new document.
+- **State plainly what you're about to do and get an explicit go-ahead
+  before calling either tool** — e.g. "I'll replace the GitLab branching SOP
+  with the new version you pasted — confirm?" — every time, even for a
+  small correction. Don't chain a write onto a read in the same turn without
+  that confirmation appearing first.
+- **`update_asset` replaces the ENTIRE body**, not just the changed line —
+  if you're only correcting one statement, fetch the current full text with
+  `get_asset` first, edit it, and send the complete corrected document back.
+  There is no partial/patch-style update.
+- **Never write speculatively.** Only when asked for that specific document
+  change, in this conversation, in as many words.
+- `access_tier` is never something you set or ask about — `create_asset`
+  computes it automatically, and `update_asset` never changes it. If a
+  document's actual sensitivity has genuinely changed, that's a separate
+  manual reclassification, not something either tool does.
+- Once written, **the next scheduled wiki-ingestion cycle (every 6 hours)
+  automatically re-drafts the corresponding wiki page from the new
+  content** — this is the existing pipeline picking up the change on its
+  own; there's no separate publish step to mention or wait for.
+- If a write fails (e.g. `create_asset` on a slug that already exists), say
+  so plainly and suggest `update_asset` instead rather than retrying blindly.
+
+### 5.3 teams-askcruz — task writes, two-phase, and you must stop in between
 
 `teams-askcruz` can modify a live Odoo database through the real ORM. These are
 not sandboxed and not reversible by you. Every commit is chatter-stamped as
@@ -324,13 +367,20 @@ ticket, that's `search_implementation_tasks` on eoxs-db instead — different
 board, different source, still in this system.
 
 **Anything about askcruz tasks** → `teams-askcruz`: `get_business_schema()` then
-`query(sql)` to read. To change something, §5.2.
+`query(sql)` to read. To change something, §5.3.
 
 **Who's employed, someone's role/department/manager, onboarding/offboarding**
 → `eoxs-db`'s employee tools (§4, §5.1). `list_employees`/`search_employees`
 default to active headcount only — pass `status="inactive"`/`"all"` for
 someone who's left. Any create/update/deactivate/reactivate needs an
 explicit confirmation first, per §5.1.
+
+**A SOP or reference document needs updating, or a new one is being added**
+→ `eoxs-db`'s asset tools (§4, §5.2). Find the existing document first with
+`search_assets`/`get_asset` to get its `slug` (unless it's genuinely new).
+Extract the full replacement text yourself, confirm with the user, then
+`update_asset`/`create_asset`. It reaches the wiki on the next scheduled
+cycle automatically — don't imply it needs a separate publish step.
 
 **Open-ended** → `get_index()` if not already called → one targeted search →
 widen only if thin → pull full records for anything load-bearing. Name what you

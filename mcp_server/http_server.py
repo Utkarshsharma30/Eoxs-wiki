@@ -51,6 +51,13 @@ create/update/deactivate/reactivate_employee, gated independently of
 even though `general` otherwise shares HR_CLEARANCE with `hr`). See
 mcp_server/employees.py and schema/025_employees.sql.
 
+2026-08-13: `full` and `hr` also get mcp_server/asset_writes.py's
+create_asset/update_asset -- the second and, per explicit instruction, last
+write surface in this server. `full` is unrestricted; `hr` gets
+update_asset ONLY, and only for `SALARY_ASSET_SLUG` ('eoxs-salary-details')
+-- any other slug is refused with a plain permission error. general/intern
+get neither tool. See schema/032_asset_change_log.sql.
+
 Run with: python -m mcp_server.http_server  (dev, binds 127.0.0.1 only)
 Deployed via systemd as eoxs-mcp.service, reverse-proxied by nginx at
 https://5.223.44.95/mcp/<secret>/sse -- nginx passes /mcp/ through
@@ -84,14 +91,20 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # hangs after a successful-looking initial SSE connection.
 MOUNT_PREFIX = "/mcp"
 
+SALARY_ASSET_SLUG = "eoxs-salary-details"
+
 IDENTITIES = [
-    # 5th element: enable_employee_tools -- the employees.py tool set
-    # (list/search/get + create/update/deactivate/reactivate_employee) is
-    # gated here, deliberately independent of `clearance` (see server.py's
-    # build_server() docstring): general/intern get NO employee tools at
-    # all, even though 'general' otherwise shares HR_CLEARANCE with 'hr'.
-    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True),
-    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True),
+    # 5th element: enable_employee_tools (see server.py's build_server()
+    # docstring) -- general/intern get NO employee tools at all, even
+    # though 'general' otherwise shares HR_CLEARANCE's clearance with 'hr'.
+    # 6th element: asset_write_scope -- "all" (full, unrestricted),
+    # a specific slug set (hr, salary register only), or None (general/
+    # intern, no asset write tools at all). Independent of `clearance` for
+    # the same reason enable_employee_tools is: these are the only two
+    # write surfaces in the whole server, deliberately gated identity-by-
+    # identity, never by the read-side tier system.
+    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True, "all"),
+    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {SALARY_ASSET_SLUG}),
     # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
     # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
     # dollar figure alongside otherwise-relevant general content, and general
@@ -101,15 +114,15 @@ IDENTITIES = [
     # figure (including payroll -- unlike hr's non_payroll_monetary_amounts
     # carve-out); employee_activity_monitoring keeps Cattr/performance data
     # HR+full-only regardless of the wider tier clearance (see redaction.py).
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False),
-    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False),
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None),
+    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False, None),
 ]
 
 
-def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), enable_employee_tools=False):
+def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), enable_employee_tools=False, asset_write_scope=None):
     mcp_server_instance = build_server(
         clearance, name=f"eoxs-wiki-db-{identity_name}", extra_redact_categories=extra_redact_categories,
-        enable_employee_tools=enable_employee_tools, identity_name=identity_name,
+        enable_employee_tools=enable_employee_tools, identity_name=identity_name, asset_write_scope=asset_write_scope,
     )
     sse = SseServerTransport(f"{MOUNT_PREFIX}/{secret}/messages/")
 
@@ -132,8 +145,8 @@ def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), e
 
 routes = [
     route
-    for identity_name, secret, clearance, extra, enable_employee_tools in IDENTITIES
-    for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools)
+    for identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope in IDENTITIES
+    for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope)
 ]
 
 app = Starlette(routes=routes)

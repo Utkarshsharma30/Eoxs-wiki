@@ -43,6 +43,7 @@ from mcp.types import Tool, TextContent
 from mcp_server.db import query as db_query, query_one as db_query_one
 from mcp_server import redaction
 from mcp_server.employees import EMPLOYEE_TOOLS, EMPLOYEE_WRITE_TOOLS, tool_defs as employee_tool_defs
+from mcp_server.asset_writes import ASSET_WRITE_TOOLS, create_asset_tool_def, update_asset_tool_def
 
 BODY_PREVIEW_CHARS = 1500  # full body is often 10-50K chars; a preview keeps get_* calls usable
 
@@ -282,6 +283,12 @@ def get_asset(identifier, clearance=FULL_CLEARANCE):
         row = db_query_one("SELECT * FROM assets WHERE id = %s AND access_tier::text = ANY(%s)", (int(identifier), clearance))
     else:
         row = db_query_one("SELECT * FROM assets WHERE slug = %s AND access_tier::text = ANY(%s)", (identifier, clearance))
+    if row:
+        row["change_history"] = db_query(
+            "SELECT changed_by, change_type, occurred_at FROM asset_change_log "
+            "WHERE asset_id = %s ORDER BY occurred_at DESC",
+            (row["id"],),
+        )
     if not row:
         return {"error": f"no asset matching '{identifier}'"}
     return row
@@ -508,7 +515,7 @@ TOOLS = {
 }
 
 
-def _tool_defs(enable_employee_tools=False):
+def _tool_defs(enable_employee_tools=False, asset_write_scope=None):
     defs = [
         Tool(
             name="get_index",
@@ -648,10 +655,15 @@ def _tool_defs(enable_employee_tools=False):
     ]
     if enable_employee_tools:
         defs = defs + employee_tool_defs()
+    if asset_write_scope == "all":
+        defs = defs + [create_asset_tool_def(), update_asset_tool_def()]
+    elif asset_write_scope is not None:
+        defs = defs + [update_asset_tool_def()]
     return defs
 
 
-def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), enable_employee_tools=False, identity_name=None):
+def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), enable_employee_tools=False,
+                  identity_name=None, asset_write_scope=None):
     """Builds a fresh Server instance whose tier-filtered tools are all
     bound to `clearance`. Each identity (stdio/local, or one HTTP/SSE
     secret path) gets its OWN Server instance from this -- clearance is
@@ -674,7 +686,23 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
     (EMPLOYEE_WRITE_TOOLS) get `changed_by` bound to identity_name here,
     the same construction-time-binding pattern as `clearance` -- never
     part of a tool's inputSchema, so a caller can't spoof who made a
-    change."""
+    change.
+
+    asset_write_scope: gates mcp_server/asset_writes.py's tools onto this
+    identity -- the ONLY other write surface in this server besides
+    employees.py, and deliberately the last one (explicit instruction: no
+    other table gets a write path). Three states:
+      - None (default) -- no asset write tools at all (general/intern).
+      - "all" -- both create_asset and update_asset, unrestricted by slug
+        (the `full` identity only).
+      - any other iterable -- ONLY update_asset, and only for slugs in that
+        set (the `hr` identity, bound to {'eoxs-salary-details'} today).
+        create_asset is never bound for a restricted scope -- adding a
+        brand-new document is a `full`-only action, not something a
+        slug-restriction could safely narrow.
+    Like `changed_by` above, both `changed_by` and the slug restriction are
+    bound here via functools.partial, never taken from the tool call's own
+    arguments."""
     tools = {
         tool_name: (functools.partial(func, clearance=clearance) if tool_name in TIER_FILTERED_TOOLS else func)
         for tool_name, func in TOOLS.items()
@@ -685,11 +713,19 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
             tool_name: (functools.partial(func, changed_by=who) if tool_name in EMPLOYEE_WRITE_TOOLS else func)
             for tool_name, func in EMPLOYEE_TOOLS.items()
         })
+    if asset_write_scope is not None:
+        who = identity_name or name
+        tools["update_asset"] = functools.partial(
+            ASSET_WRITE_TOOLS["update_asset"], changed_by=who,
+            _allowed_slugs=None if asset_write_scope == "all" else frozenset(asset_write_scope),
+        )
+        if asset_write_scope == "all":
+            tools["create_asset"] = functools.partial(ASSET_WRITE_TOOLS["create_asset"], changed_by=who)
     srv = Server(name)
 
     @srv.list_tools()
     async def list_tools():
-        return _tool_defs(enable_employee_tools)
+        return _tool_defs(enable_employee_tools, asset_write_scope)
 
     @srv.call_tool()
     async def call_tool(tool_name, arguments):
@@ -719,12 +755,13 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
 # Local/stdio access (Claude Code CLI, Claude Desktop) -- full clearance,
 # since running this file at all already requires the .env Postgres
 # credentials, i.e. trusted-equivalent access with no narrower boundary
-# to enforce here. Employee tools included too, same reasoning -- also
-# identity_name="full" so employee_change_log attributes local-access
-# writes the same way the `full` HTTP identity's are. The HTTP/SSE
-# transport in http_server.py builds its own separate, narrower
-# instance(s) via build_server() instead of using this one.
-server = build_server(FULL_CLEARANCE, enable_employee_tools=True, identity_name="full")
+# to enforce here. Employee and asset write tools included too, same
+# reasoning -- also identity_name="full" so employee_change_log/
+# asset_change_log attribute local-access writes the same way the `full`
+# HTTP identity's are. The HTTP/SSE transport in http_server.py builds its
+# own separate, narrower instance(s) via build_server() instead of using
+# this one.
+server = build_server(FULL_CLEARANCE, enable_employee_tools=True, identity_name="full", asset_write_scope="all")
 
 
 async def main():

@@ -85,12 +85,12 @@ GENERAL_CLEARANCE = ["tier2"]
 
 `http_server.py` creates **four separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
 
-| Identity | Secret env var | Clearance | Extra redaction | Employee tools? |
-|---|---|---|---|---|
-| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) |
-| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) |
-| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No |
-| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No |
+| Identity | Secret env var | Clearance | Extra redaction | Employee tools? | Asset write? |
+|---|---|---|---|---|---|
+| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) | create + update, any slug |
+| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) | update only, `eoxs-salary-details` only |
+| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No | No |
+| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No | No |
 
 ### 5.1 Employee directory tools (2026-08-12) — the first write path
 
@@ -99,6 +99,21 @@ GENERAL_CLEARANCE = ["tier2"]
 Write tools (`create_employee`/`update_employee`/`deactivate_employee`/`reactivate_employee`) take a `changed_by` kwarg bound at server-construction time to the identity name (`"full"` or `"hr"`), the same pattern `clearance` already uses — never part of a tool's `inputSchema`, so nothing a caller sends can spoof who made a change. Every write is logged to `employee_change_log` (best-effort, matching `ingest_log.py`'s "a logging failure must never mask an otherwise-successful run" philosophy — the employee-table write itself is what has to succeed).
 
 Deletion is soft-delete only (`deactivate_employee` sets `status='inactive'`, never a real `DELETE`) — `list_employees`/`search_employees` default to `status='active'` (current headcount) and take an explicit `status='inactive'`/`'all'` argument for historical/former-employee lookups.
+
+### 5.2 Asset writes (2026-08-13) — the second and last write path
+
+`mcp_server/asset_writes.py` adds `create_asset`/`update_asset` for the `assets` table (schema/031, docs/raw-ingestion.md §2) — curated internal reference documents: SOPs, company overview, ICP, salary register, product-feature specs, technical references. Per explicit instruction, this and the employee directory (§5.1) are the **only** two write surfaces anywhere in this server — no other table has, or is planned to have, a write path.
+
+Gating is per-tool, not just per-identity, via `asset_write_scope` on `build_server()`:
+- `full`: `asset_write_scope="all"` — both `create_asset` and `update_asset`, any slug.
+- `hr`: `asset_write_scope={"eoxs-salary-details"}` — `update_asset` **only**, and only for that one slug (a constant, `SALARY_ASSET_SLUG`, in `http_server.py`). `create_asset` is never bound for a restricted scope at all — adding a brand-new document is `full`-only, not something a slug allowlist could safely narrow. Calling `update_asset` with any other slug returns a plain permission error (`{"error": "this connection cannot write to asset '<slug>' -- only [...] is permitted"}`), not a partial write or silent no-op.
+- `general`/`intern`: `asset_write_scope=None` — neither tool exists on these connections at all.
+
+`create_asset` computes `access_tier` automatically via the same `inline_tier_classifier.classify_tier()` call the one-time import (`ingestion/import_assets.py`) uses — it is never a caller-supplied argument, so a mis-tiered sensitive document can't be created as `tier2` by mistake. `update_asset` does **not** reclassify `access_tier` on edit, matching the "tier survives every refresh" convention every raw-ingestion writer in this codebase already follows (docs/raw-ingestion.md §3) — a genuine sensitivity change is a deliberate manual reclassification, not a side effect of an ordinary content edit.
+
+Every write is logged to `asset_change_log` (schema/032) — full old/new title and body text per change, not just field-level diffs (unlike `employee_change_log`; these are a "handful of long documents," per schema/031's own comment, so a real version history is affordable and, for the salary register specifically, valuable in its own right). `get_asset` surfaces a lightweight `change_history` (who, what kind of change, when) inline; the full before/after text lives in `asset_change_log` itself, not repeated on every `get_asset` call.
+
+**Why no extra pipeline work was needed to keep the wiki fresh**: `wiki_ingestion/detect.py`'s `candidates_assets()` (built 2026-08-12 for the one-time backfill) already watches `assets.updated_at` against a stored cursor and content-hashes the result — it has no way to distinguish "changed by a script" from "changed by a live tool call." A `create_asset`/`update_asset` call is simply a new way to advance `updated_at` on a row that partition was already watching. The next scheduled `eoxs-wiki-pipeline.timer` run (every 6 hours) picks up any asset write automatically and re-drafts the corresponding wiki page — exactly the behavior asked for, with zero changes to `wiki_ingestion/`.
 
 One-off import: `loaders/import_employees_from_xlsx.py` merges EOXS's multi-sheet HR spreadsheet into one canonical row per person (deduped by name, then by shared email — catches same-person/different-spelling cases like "Dhrup" vs "Dhrup Kumar"). Deliberately excludes LinkedIn URLs, personal phone numbers, and — most importantly — a plaintext-password column present in the source sheet, never imported regardless of how this table gets used later.
 
@@ -113,7 +128,7 @@ A **5th** `Server` instance (`server.py`'s module-level `server = build_server(F
 **Tool count: 20** tiered/read-only tools, present for every identity:
 `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
 (`list_assets`/`search_assets`/`get_asset` added 2026-08-12 alongside the new `assets` table — see `docs/raw-ingestion.md` §2 Assets. `get_asset` returns the full raw document; the corresponding wiki page under `wiki/sources/assets/` is a synthesized summary, not a substitute for the original text.)
-Plus **7 employee-directory tools** (§5.1), present only for `full`/`hr` — **27 tools total** for those two identities, 20 for `general`/`intern`.
+Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`hr` — **29 tools total** for `full` (20 + 7 + 2), **28** for `hr` (20 + 7 + 1, no `create_asset`), still **20** for `general`/`intern`.
 
 `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
 

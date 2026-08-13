@@ -41,12 +41,13 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 029 | `029_oauth_accounts_zoho.sql` | Generalizes `oauth_accounts` for Zoho: adds `external_account_id` (Zoho's numeric per-mailbox identifier), relaxes `client_type`'s CHECK constraint to free text. |
 | 030 | `030_source_account_text.sql` | Converts `email_threads.source_account` from a fixed enum to `TEXT` — a rigid enum meant every new self-serve-connected account needed a schema migration before its first write. |
 | 031 | `031_assets.sql` | `assets` — new raw source category for curated internal reference documents (SOPs, company overview, ICP, salary register, etc.) migrated from `raj-wiki-vault`'s file-based pipeline. The corresponding wiki pages were already here (`wiki_pages.source_file_path` still reads `wiki/sources/assets/...`) but the raw layer never was, leaving their `wiki_citations` permanently `unresolved` until this. See `docs/raw-ingestion.md` and `ingestion/import_assets.py`. |
+| 032 | `032_asset_change_log.sql` | `asset_change_log` — audit trail for `create_asset`/`update_asset` (the second and, per explicit instruction, last write-capable table in this server, alongside `employees`). See `docs/backend-server.md` §5.2. |
 
 ## 2. Every table, grouped logically
 
-**41 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**42 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
-- **Employee directory:** `employees`, `employee_change_log` — directly-written operational data, deliberately NOT part of the wiki/tiered-content system (no `access_tier` column, never cited by a wiki page, never touched by wiki_ingestion). The only tables in this database with a write path through the MCP server at all — gated to the `full` (Raj) and `hr` (Isha) identities only, see `docs/backend-server.md` §5.
+- **Employee directory:** `employees`, `employee_change_log` — directly-written operational data, deliberately NOT part of the wiki/tiered-content system (no `access_tier` column, never cited by a wiki page, never touched by wiki_ingestion). Gated to the `full` (Raj) and `hr` (Isha) identities only, see `docs/backend-server.md` §5.1.
 - **Reference:** `clients`, `contacts`
 - **Emails:** `email_threads`, `email_messages`, `email_attachments`
 - **Wiki (live):** `wiki_pages`, `wiki_links`, `wiki_citations`, `wiki_flags`
@@ -56,7 +57,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
 - **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
 - **Connected-account credentials:** `oauth_accounts` (per-account Gmail *and Zoho* refresh tokens — `gmail_fetcher.py`/`zoho_fetcher.py`'s `load_accounts()` read this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled; `external_account_id` is Zoho-only, its numeric per-mailbox identifier; `client_type` picks which registered OAuth client to refresh against), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback; `code_verifier` is Gmail-flow-only, PKCE). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
-- **Curated reference docs:** `assets` (SOPs, company overview, ICP, salary register, product-feature specs — see migration 031 above). No `access_tier` uniformity — classified per-document, since e.g. the salary register is far more sensitive than a GitLab branching SOP.
+- **Curated reference docs:** `assets`, `asset_change_log` (SOPs, company overview, ICP, salary register, product-feature specs — see migration 031 above). No `access_tier` uniformity on `assets` — classified per-document, since e.g. the salary register is far more sensitive than a GitLab branching SOP. Alongside `employees`/`employee_change_log`, this is the **only other** table pair in this database with a write path through the MCP server — `full` (any document) and `hr` (the salary register only), see `docs/backend-server.md` §5.2. No other table in this list has, or is planned to have, any write path.
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
 
 A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
@@ -240,6 +241,13 @@ assets: id serial PK, slug text UNIQUE NOT NULL (matches wiki_pages.sources_raw 
   source_file_path text (provenance only -- raj-wiki-vault's raw/assets/<file>, not a live path
   on this box), access_tier access_tier NOT NULL (classified per-document, not uniform --
   see ingestion/import_assets.py), imported_at/updated_at timestamptz
+
+asset_change_log: id serial PK, asset_id int NOT NULL FK->assets,
+  changed_by text NOT NULL ('full' | 'hr' -- the MCP identity name, bound at
+  server-construction time, never taken from a tool call's own arguments),
+  change_type text NOT NULL ('created' | 'updated'), changes jsonb (full old/new
+  title and body text per change, not just field-level diffs -- see docs/backend-server.md §5.2
+  for why a full-text version history is affordable here), occurred_at timestamptz
 ```
 
 ## 4. Indexes

@@ -20,7 +20,7 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
    and a troubleshooting section built from real mistakes made setting this up.
 9. **`docs/training/`** — intern/new-hire orientation video scripts.
 
-## Current state, as of 2026-08-12 — the things most likely to matter immediately
+## Current state, as of 2026-08-13 — the things most likely to matter immediately
 
 - **4 MCP identities**, not 3: `full` (Raj, everything), `hr` (confidential + general,
   payroll visible, every other dollar amount stripped), `general` (confidential + general,
@@ -35,11 +35,25 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 - **Employee directory added 2026-08-12** (`employees` table + `mcp_server/employees.py`)
   — this server's first-ever write path. 7 tools (list/search/get + create/update/
   deactivate/reactivate_employee), gated to the `full` (Raj) and `hr` (Isha) identities
-  only — **27 tools total** for those two, still 20 for `general`/`intern`. Soft-delete
-  only (`status` active/inactive, never a real `DELETE`); every write audited to
-  `employee_change_log`. Deliberately outside the tiered-content system (no `access_tier`
-  column) and outside the wiki-ingestion pipeline entirely — see `docs/backend-server.md`
-  §5.1 and `docs/postgres-database.md`.
+  only. Soft-delete only (`status` active/inactive, never a real `DELETE`); every write
+  audited to `employee_change_log`. Deliberately outside the tiered-content system (no
+  `access_tier` column) and outside the wiki-ingestion pipeline entirely — see
+  `docs/backend-server.md` §5.1 and `docs/postgres-database.md`.
+- **Asset writes added 2026-08-13** (`mcp_server/asset_writes.py`) — the second and, per
+  explicit instruction, **last** write path this server will get; every other table stays
+  read-only, permanently. `create_asset`/`update_asset` for the `assets` table (§ above):
+  `full` gets both, any document; `hr` gets `update_asset` **only**, and only for
+  `eoxs-salary-details` — any other slug is refused with a plain permission error.
+  `create_asset` auto-classifies `access_tier` the same way the one-time import does
+  (never a caller-supplied argument). `update_asset` does NOT reclassify `access_tier` on
+  edit — it survives, matching every raw-ingestion writer's existing convention. Every
+  write audited to `asset_change_log` (full old/new text, not just field diffs — see
+  `docs/backend-server.md` §5.2 for why). Deliberately **wired INTO** wiki-ingestion,
+  unlike employees: `wiki_ingestion/detect.py`'s existing `candidates_assets()` partition
+  already watches `assets.updated_at`, so any create/update here is picked up and
+  re-drafted into the wiki by the next scheduled 6-hour cycle automatically — no pipeline
+  changes were needed. **Tool totals**: `full` 29 (20 read + 7 employee + 2 asset-write),
+  `hr` 28 (20 + 7 + 1), still 20 for `general`/`intern`.
 - **Gmail accounts are now DB-backed, not hardcoded `.env` triplets** (`oauth_accounts` table,
   2026-08-12) — `raj_gmail`/`ron_gmail`/`remya_gmail` migrated over unchanged (same behavior:
   remya excluded from the recurring sweep via `raw_sweep_enabled=false`, not a name check

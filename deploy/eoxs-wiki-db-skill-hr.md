@@ -6,12 +6,13 @@ description: Navigation and access-scope guide for the HR/trusted-clearance EOXS
 # EOXS Data — Session Skill (HR / Trusted Access)
 
 You have two EOXS data connectors. **eoxs-teams is fully read-only. eoxs-db is
-read-only except for one thing: the employee directory** (§3) — everything
-else on eoxs-db is exactly as read-only as eoxs-teams.
+read-only except for two things: the employee directory, and one specific
+document** (§3) — everything else on eoxs-db is exactly as read-only as
+eoxs-teams.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, **plus the employee directory** | 27 tools: 20 read-only + 7 for the employee directory only (§3, §5) |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, **plus the employee directory** | 28 tools: 20 read-only + 7 employee-directory + 1 asset write, salary register only (§3, §5) |
 | **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 
 All EOXS data here is confidential — business correspondence, financials,
@@ -105,20 +106,29 @@ amount the same plain way as a not-found.
 
 ---
 
-## 3. Write scope — one exception, and nothing else
+## 3. Write scope — two exceptions, and nothing else
 
-**The only write capability on either connector, anywhere, is the employee
-directory on eoxs-db**: `create_employee`, `update_employee`,
-`deactivate_employee`, `reactivate_employee` (tool details in §5). Every
-other piece of data reachable from this connection — wiki pages, emails,
-calls, implementation tasks, clients, contacts, and everything on
-`eoxs-teams` (tickets, invoices/sales orders, CRM/pipeline) — remains fully
-read-only, with no exceptions. There is no tool that creates, updates, or
-removes any of it. If asked to change something outside the employee
-directory, say plainly that this connection is read-only for that and
-cannot do it.
+**The only write capability on either connector, anywhere, is (a) the
+employee directory on eoxs-db** — `create_employee`, `update_employee`,
+`deactivate_employee`, `reactivate_employee` — **and (b) exactly one
+document, the salary register** — `update_asset`, and only for slug
+`eoxs-salary-details` (tool details in §5). Every other piece of data
+reachable from this connection — wiki pages, emails, calls, implementation
+tasks, clients, contacts, every other internal reference document (SOPs,
+company overview, ICP, product specs, etc.), and everything on `eoxs-teams`
+(tickets, invoices/sales orders, CRM/pipeline) — remains fully read-only,
+with no exceptions. There is no tool that creates, updates, or removes any
+of it. If asked to change something outside these two, say plainly that
+this connection is read-only for that and cannot do it.
 
-For the employee directory itself:
+**On the document side specifically: you have no `create_asset` tool at
+all** — this connection can only ever edit the one existing salary
+document, never add a new one. Calling `update_asset` on any slug other
+than `eoxs-salary-details` returns a plain permission error from the server
+itself, not a partial write — don't attempt it hoping it might work for
+some other document; it structurally cannot.
+
+For the employee directory:
 
 - These four tools write directly to the live `employees` table, immediately
   — no preview step, no undo tool. Removing someone is `deactivate_employee`
@@ -135,6 +145,25 @@ For the employee directory itself:
   row — don't describe it in softened or approximate terms.
 - If a write fails (e.g. a duplicate email, an unknown `employee_id`), say so
   plainly. Don't retry with altered values hoping it lands.
+
+For the salary register (`update_asset`):
+
+- Writes directly to the live `assets` table, immediately — no preview step.
+- **`update_asset` replaces the ENTIRE document body**, not just one line —
+  if only correcting a single figure or statement, `get_asset` the current
+  full text first, edit it, and send the complete corrected document back.
+  There is no partial/patch-style update.
+- **State plainly what you're about to change and get an explicit go-ahead
+  first** — e.g. "I'll update the salary register with the new figures from
+  the file you shared — confirm?" — every time.
+- You are responsible for extracting the actual replacement text yourself
+  (from an uploaded file or pasted content) before calling the tool — it
+  takes text, not a raw file.
+- `access_tier` is never something you set or ask about; it stays
+  `tier2_confidential` regardless of what changed in the body.
+- Once updated, the next scheduled wiki-ingestion cycle (every 6 hours)
+  automatically re-drafts the corresponding wiki page — no separate publish
+  step exists or is needed.
 
 ---
 
@@ -160,7 +189,7 @@ say which you used.
 
 ## 5. Tools
 
-### eoxs-db — 27 tools: 20 read-only + 7 employee-directory (read + write, §3)
+### eoxs-db — 28 tools: 20 read-only + 7 employee-directory + 1 asset write (§3)
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to
 the matching `get_*`. Never construct or guess a `source_file_path`** —
@@ -186,14 +215,17 @@ rule as everything else in §2 — report it plainly.
 the filter, do not call twice.
 
 **Assets** (curated internal reference docs — SOPs, company overview, ICP,
-salary register, product-feature specs) — `search_assets(query)` ·
+salary register, product-feature specs) — read: `search_assets(query)` ·
 `list_assets()` · `get_asset(identifier)`. `identifier` is the numeric `id`
 (from list/search) or the document's `slug`. **`get_asset` returns the full
 original document text — use it, not `search_wiki`, when exact wording
 matters** (precise SOP steps, exact salary figures): the wiki page under
 `wiki/sources/assets/` for the same document is a synthesized summary, not a
-substitute for the source. Note: the salary register asset is
-`tier2_confidential`, same handling as any other confidential figure — see §2.
+substitute for the source. `get_asset` also returns `change_history`. Note:
+the salary register asset is `tier2_confidential`, same handling as any
+other confidential figure — see §2. Write: `update_asset(slug, body, title)`
+— but **only** for `slug='eoxs-salary-details'`; read §3 before using it.
+No `create_asset` tool exists on this connection.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a
@@ -293,6 +325,13 @@ board, different source, still in this system.
 default to active headcount only — pass `status="inactive"`/`"all"` for
 someone who's left. Any create/update/deactivate/reactivate needs an
 explicit confirmation first, per §3.
+
+**The salary register needs updating** → `eoxs-db`'s `update_asset` (§3, §5),
+slug `eoxs-salary-details` only. `get_asset` the current full text first if
+you're only correcting part of it — the tool replaces the whole document.
+Confirm with the user before writing. Any other document (SOPs, company
+overview, etc.) — say plainly this connection can't edit it; that's a
+`full`-only action.
 
 **Payroll, compensation, salary, investor/financial questions** (that ARE in
 eoxs-db — emails, wiki, etc., not the ticket/invoice data now on eoxs-teams)
