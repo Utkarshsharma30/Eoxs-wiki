@@ -106,6 +106,30 @@ def finish_cycle_parent(parent_issue_id, cycle_id, summary):
     _safe(_update, parent_issue_id, title, body, state)
 
 
+def fail_cycle_parent(parent_issue_id, cycle_id, reason, orphaned=False):
+    """For a cycle that never reached finish_cycle_parent() at all -- an
+    unhandled exception (see run_cycle.py's top-level try/except) or a
+    hard kill/OOM that left the DB row and this Linear issue stuck at
+    'running' forever (see reap_orphaned_cycles()). Distinct from
+    finish_cycle_parent()'s normal 'batches_failed>0' path, which still
+    completes normally and reports per-batch detail -- this is for when
+    the driver itself never got that far. Kept at 'Todo' (not a special
+    'Failed' state) to match this team's existing convention that any
+    failure needs a human look, same as finish_cycle_parent()'s own
+    batches_failed branch."""
+    if not parent_issue_id:
+        return
+    verb = "ORPHANED (process died, cycle never completed)" if orphaned else "CRASHED"
+    title = f"Wiki-ingestion cycle {cycle_id} — {verb}"
+    body = (
+        f"**Status: {verb}**\n\n"
+        f"This cycle's driver process {'was found gone at the next scheduled run, with the DB row still marked ``running``' if orphaned else 'raised an unhandled exception and stopped'} "
+        f"-- no batches after this point were attempted this run.\n\n"
+        f"```\n{reason[-4000:]}\n```"
+    )
+    _safe(_update, parent_issue_id, title, body, "Todo")
+
+
 def _cycle_pages_drafted(cycle_id):
     conn = get_live_conn()
     try:
@@ -189,6 +213,20 @@ def finish_batch_task(issue_id, cycle_id, source_kind, chunk_index, total_chunks
 # Phase 4 -- consolidation. One parent per pass, one child task per group.
 # ---------------------------------------------------------------------------
 
+def fail_consolidation_parent(parent_issue_id, reason):
+    """Same gap as fail_cycle_parent, for Phase 4: an unhandled exception
+    between start_consolidation_parent() and the pass's normal return
+    would otherwise leave this issue stuck at 'running' forever. No DB-side
+    'running' row exists for this phase (unlike wiki_ingest_cycles), so
+    there's no orphan-reaping counterpart to this -- only the in-process
+    try/except in run_consolidation.py catches this one."""
+    if not parent_issue_id:
+        return
+    title = "Wiki-ingestion consolidation pass — CRASHED"
+    body = f"**Status: CRASHED** — unhandled exception, no further groups were attempted.\n\n```\n{reason[-4000:]}\n```"
+    _safe(_update, parent_issue_id, title, body, "Todo")
+
+
 def start_consolidation_parent(groups_total):
     title = f"Wiki-ingestion consolidation pass — running ({groups_total} duplicate group(s))"
     body = f"Started {now_utc().strftime('%Y-%m-%d %H:%M:%S UTC')} · {groups_total} duplicate-title group(s) found."
@@ -249,6 +287,16 @@ def _get_staging_pages(ids):
 # ---------------------------------------------------------------------------
 # Phase 5 -- review. One parent per sweep, one child task per chunk.
 # ---------------------------------------------------------------------------
+
+def fail_review_parent(parent_issue_id, reason):
+    """Same gap as fail_cycle_parent, for Phase 5. See fail_consolidation_parent
+    -- same caveat, no DB-side orphan-reaping counterpart for this phase."""
+    if not parent_issue_id:
+        return
+    title = "Wiki-ingestion review sweep — CRASHED"
+    body = f"**Status: CRASHED** — unhandled exception, no further chunks (and no promotion) were attempted this sweep.\n\n```\n{reason[-4000:]}\n```"
+    _safe(_update, parent_issue_id, title, body, "Todo")
+
 
 def start_review_parent(drafts_total):
     title = f"Wiki-ingestion review sweep — running ({drafts_total} draft(s))"

@@ -10,11 +10,12 @@ group; a failed merge just leaves that group's duplicates as-is for the
 next consolidation pass to retry.
 """
 import json
+import traceback
 
 from wiki_ingestion.consolidate import find_duplicate_groups
 from wiki_ingestion.headless_agent import run_headless_agent, WIKI_MCP_BASE_URL
 from wiki_ingestion.linear_report import (
-    start_consolidation_parent, finish_consolidation_parent,
+    start_consolidation_parent, finish_consolidation_parent, fail_consolidation_parent,
     start_consolidation_task, finish_consolidation_task,
 )
 
@@ -62,23 +63,27 @@ def run_consolidation_pass(timeout_seconds=900):
     groups = find_duplicate_groups()
     parent_issue_id = start_consolidation_parent(len(groups)) if groups else None
 
-    results = []
-    for group in groups:
-        task_issue_id = start_consolidation_task(parent_issue_id, group)
-        result = run_consolidation_agent(group, timeout_seconds=timeout_seconds)
-        finish_consolidation_task(task_issue_id, group, result)
-        entry = {"title": group["title"], "page_ids": group["page_ids"], "ok": result["ok"]}
-        if not result["ok"]:
-            entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
-        results.append(entry)
-    result = {
-        "groups_total": len(groups),
-        "groups_failed": sum(1 for r in results if not r["ok"]),
-        "results": results,
-    }
-    if parent_issue_id:
-        finish_consolidation_parent(parent_issue_id, result)
-    return result
+    try:
+        results = []
+        for group in groups:
+            task_issue_id = start_consolidation_task(parent_issue_id, group)
+            result = run_consolidation_agent(group, timeout_seconds=timeout_seconds)
+            finish_consolidation_task(task_issue_id, group, result)
+            entry = {"title": group["title"], "page_ids": group["page_ids"], "ok": result["ok"]}
+            if not result["ok"]:
+                entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
+            results.append(entry)
+        result = {
+            "groups_total": len(groups),
+            "groups_failed": sum(1 for r in results if not r["ok"]),
+            "results": results,
+        }
+        if parent_issue_id:
+            finish_consolidation_parent(parent_issue_id, result)
+        return result
+    except Exception:
+        fail_consolidation_parent(parent_issue_id, traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":

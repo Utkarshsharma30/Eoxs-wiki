@@ -20,13 +20,14 @@ it's recorded and the driver moves on to the next chunk, matching
 run_agent()'s own never-raises contract.
 """
 import json
+import traceback
 
 from ingestion.db import get_live_conn
 from ingestion.state import now_utc
 from wiki_ingestion.detect import build_all_candidates, run_detection
 from wiki_ingestion.run_agent import run_agent
 from wiki_ingestion.linear_report import (
-    start_cycle_parent, finish_cycle_parent, start_batch_task, finish_batch_task,
+    start_cycle_parent, finish_cycle_parent, fail_cycle_parent, start_batch_task, finish_batch_task,
 )
 
 # Rows per sub-agent call. Chosen to keep each call's candidate list (and
@@ -116,47 +117,93 @@ def _chunk(rows, size):
     return [rows[i:i + size] for i in range(0, len(rows), size)]
 
 
+def reap_orphaned_cycles():
+    """Called at the top of every run_cycle() invocation, before starting a
+    new cycle. eoxs-wiki-pipeline.service is Type=oneshot, so systemd
+    guarantees only one invocation runs at a time -- if we've reached this
+    point, any OTHER wiki_ingest_cycles row still marked 'running' cannot
+    belong to a process that's still alive. It's a cycle whose driver died
+    hard enough to never reach either the normal _finish_cycle() call or
+    run_cycle()'s own except block below (a hard kill, OOM, or -- the real
+    2026-08-13 incident this was built for -- an unhandled exception from
+    before that except block existed at all). Left alone, its Linear
+    parent issue sits stuck at 'running' forever with no way to close
+    itself. Marks each orphan 'failed' and updates its Linear issue so a
+    human sees a clear ORPHANED status instead of a permanently-stale
+    'running' one."""
+    conn = get_live_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, linear_parent_issue_id FROM wiki_ingest_cycles WHERE status = 'running'")
+            orphans = cur.fetchall()
+    finally:
+        conn.close()
+    for o in orphans:
+        reason = (
+            "No unhandled-exception traceback available -- this cycle's process was already gone "
+            "by the time the next scheduled run started, without ever reaching this file's failure "
+            "handler (a hard kill, an OOM, or a crash from before this self-healing check existed)."
+        )
+        _finish_cycle(o["id"], "failed", {"status": "orphaned", "error": reason})
+        fail_cycle_parent(o["linear_parent_issue_id"], o["id"], reason, orphaned=True)
+
+
 def run_cycle(advance_cursors=True, timeout_seconds=1200):
     """Runs one full wiki-ingestion cycle: detect changed rows across every
     partition, split each partition into CHUNK_SIZE-row chunks, then run
-    one sub-agent per chunk, sequentially. Returns a summary dict; never
-    raises -- a batch failure is recorded and the driver moves on to the
-    next chunk, matching run_agent()'s never-raises contract."""
+    one sub-agent per chunk, sequentially. Returns a summary dict; a batch
+    failure never raises (recorded, driver moves to the next chunk,
+    matching run_agent()'s never-raises contract) -- but anything that
+    escapes THAT (a bug in the driver itself, a DB outage mid-cycle, etc.)
+    is now caught here too: marks the cycle 'failed' with the real
+    traceback recorded in both wiki_ingest_cycles.summary (queryable) and
+    the Linear parent issue, then re-raises so the process still exits
+    non-zero and journalctl still shows it -- this is what was missing
+    during the 2026-08-13 incident where cycle 46 crashed in
+    run_detection() and its Linear issue sat stuck at 'running' forever."""
+    reap_orphaned_cycles()
     cycle_id = _start_cycle()
     parent_issue_id = start_cycle_parent(cycle_id)
     _set_cycle_linear_parent(cycle_id, parent_issue_id)
-    partitions = run_detection(cycle_id, advance_cursors=advance_cursors)
 
-    batches = []
-    for source_kind, rows in partitions.items():
-        chunks = _chunk(rows, CHUNK_SIZE)
-        for chunk_index, chunk_rows in enumerate(chunks):
-            task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
-            since_ts = now_utc()
-            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
-            result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
-            finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
-            label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]" if len(chunks) > 1 else source_kind
-            if result["ok"]:
-                _finish_batch(batch_id, "done")
-                batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "done"})
-            else:
-                error = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
-                _finish_batch(batch_id, "ingest_failed", error)
-                batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "ingest_failed", "error": error})
+    try:
+        partitions = run_detection(cycle_id, advance_cursors=advance_cursors)
 
-    summary = {
-        "partitions_total": len(partitions),
-        "batches_total": len(batches),
-        "batches_failed": sum(1 for b in batches if b["status"] == "ingest_failed"),
-        "batches": batches,
-    }
-    cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(batches) and batches else "done"
-    summary["status"] = cycle_status
-    _finish_cycle(cycle_id, cycle_status, summary)
-    finish_cycle_parent(parent_issue_id, cycle_id, summary)
-    result = {"cycle_id": cycle_id, **summary}
-    return result
+        batches = []
+        for source_kind, rows in partitions.items():
+            chunks = _chunk(rows, CHUNK_SIZE)
+            for chunk_index, chunk_rows in enumerate(chunks):
+                task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
+                since_ts = now_utc()
+                batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
+                result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
+                finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
+                label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]" if len(chunks) > 1 else source_kind
+                if result["ok"]:
+                    _finish_batch(batch_id, "done")
+                    batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "done"})
+                else:
+                    error = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
+                    _finish_batch(batch_id, "ingest_failed", error)
+                    batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "ingest_failed", "error": error})
+
+        summary = {
+            "partitions_total": len(partitions),
+            "batches_total": len(batches),
+            "batches_failed": sum(1 for b in batches if b["status"] == "ingest_failed"),
+            "batches": batches,
+        }
+        cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(batches) and batches else "done"
+        summary["status"] = cycle_status
+        _finish_cycle(cycle_id, cycle_status, summary)
+        finish_cycle_parent(parent_issue_id, cycle_id, summary)
+        result = {"cycle_id": cycle_id, **summary}
+        return result
+    except Exception:
+        reason = traceback.format_exc()
+        _finish_cycle(cycle_id, "failed", {"status": "crashed", "error": reason})
+        fail_cycle_parent(parent_issue_id, cycle_id, reason)
+        raise
 
 
 def _reap_orphaned_batches(cycle_id):
@@ -243,46 +290,52 @@ def resume_cycle(cycle_id, timeout_seconds=1200):
         parent_issue_id = start_cycle_parent(cycle_id)
         _set_cycle_linear_parent(cycle_id, parent_issue_id)
 
-    partitions = build_all_candidates()
+    try:
+        partitions = build_all_candidates()
 
-    new_batches = []
-    for source_kind, rows in partitions.items():
-        if not rows:
-            continue
-        chunks = _chunk(rows, CHUNK_SIZE)
-        start_index = done_counts.get(source_kind, 0)
-        if start_index >= len(chunks):
-            continue
-        for chunk_index in range(start_index, len(chunks)):
-            chunk_rows = chunks[chunk_index]
-            task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
-            since_ts = now_utc()
-            batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
-            result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
-            finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
-            label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]"
-            if result["ok"]:
-                _finish_batch(batch_id, "done")
-                new_batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "done"})
-            else:
-                error = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
-                _finish_batch(batch_id, "ingest_failed", error)
-                new_batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "ingest_failed", "error": error})
+        new_batches = []
+        for source_kind, rows in partitions.items():
+            if not rows:
+                continue
+            chunks = _chunk(rows, CHUNK_SIZE)
+            start_index = done_counts.get(source_kind, 0)
+            if start_index >= len(chunks):
+                continue
+            for chunk_index in range(start_index, len(chunks)):
+                chunk_rows = chunks[chunk_index]
+                task_issue_id = start_batch_task(parent_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), chunk_rows)
+                since_ts = now_utc()
+                batch_id = _start_batch(cycle_id, source_kind, len(chunk_rows), task_issue_id)
+                result = run_agent(cycle_id, source_kind, chunk_rows, timeout_seconds=timeout_seconds)
+                finish_batch_task(task_issue_id, cycle_id, source_kind, chunk_index + 1, len(chunks), result, since_ts)
+                label = f"{source_kind}[{chunk_index + 1}/{len(chunks)}]"
+                if result["ok"]:
+                    _finish_batch(batch_id, "done")
+                    new_batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "done"})
+                else:
+                    error = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
+                    _finish_batch(batch_id, "ingest_failed", error)
+                    new_batches.append({"source_kind": label, "row_count": len(chunk_rows), "status": "ingest_failed", "error": error})
 
-    all_batches = _existing_batch_summaries(cycle_id)
-    summary = {
-        "partitions_total": len([k for k, v in partitions.items() if v]),
-        "batches_total": len(all_batches),
-        "batches_failed": sum(1 for b in all_batches if b["status"] == "ingest_failed"),
-        "resumed_orphaned_kinds": sorted(orphaned),
-        "batches": all_batches,
-    }
-    cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(all_batches) and all_batches else "done"
-    summary["status"] = cycle_status
-    _finish_cycle(cycle_id, cycle_status, summary)
-    finish_cycle_parent(parent_issue_id, cycle_id, summary)
-    result = {"cycle_id": cycle_id, **summary}
-    return result
+        all_batches = _existing_batch_summaries(cycle_id)
+        summary = {
+            "partitions_total": len([k for k, v in partitions.items() if v]),
+            "batches_total": len(all_batches),
+            "batches_failed": sum(1 for b in all_batches if b["status"] == "ingest_failed"),
+            "resumed_orphaned_kinds": sorted(orphaned),
+            "batches": all_batches,
+        }
+        cycle_status = "failed" if summary["batches_failed"] and summary["batches_failed"] == len(all_batches) and all_batches else "done"
+        summary["status"] = cycle_status
+        _finish_cycle(cycle_id, cycle_status, summary)
+        finish_cycle_parent(parent_issue_id, cycle_id, summary)
+        result = {"cycle_id": cycle_id, **summary}
+        return result
+    except Exception:
+        reason = traceback.format_exc()
+        _finish_cycle(cycle_id, "failed", {"status": "crashed", "error": reason})
+        fail_cycle_parent(parent_issue_id, cycle_id, reason)
+        raise
 
 
 if __name__ == "__main__":

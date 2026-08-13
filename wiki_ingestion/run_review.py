@@ -21,11 +21,12 @@ sweep -- it's recorded and the driver moves on; any pages in that chunk
 stay 'draft' for the next sweep to retry.
 """
 import json
+import traceback
 
 from wiki_ingestion.review import chunk_rows, find_draft_pages
 from wiki_ingestion.headless_agent import run_headless_agent, WIKI_MCP_BASE_URL
 from wiki_ingestion.linear_report import (
-    start_review_parent, finish_review_parent, start_review_task, finish_review_task,
+    start_review_parent, finish_review_parent, fail_review_parent, start_review_task, finish_review_task,
     report_pending_drafts_board,
 )
 from wiki_ingestion.promote import promote_reviewed_pages
@@ -90,33 +91,37 @@ def run_review_sweep(timeout_seconds=1200):
 
     parent_issue_id = start_review_parent(len(rows)) if rows else None
 
-    results = []
-    for i, chunk in enumerate(chunks):
-        task_issue_id = start_review_task(parent_issue_id, i, len(chunks), chunk)
-        page_ids = [r["id"] for r in chunk]
-        result = run_review_chunk(chunk, timeout_seconds=timeout_seconds)
-        finish_review_task(task_issue_id, i, len(chunks), page_ids, result)
-        entry = {"chunk_index": i, "page_ids": page_ids, "ok": result["ok"]}
-        if not result["ok"]:
-            entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
-        results.append(entry)
+    try:
+        results = []
+        for i, chunk in enumerate(chunks):
+            task_issue_id = start_review_task(parent_issue_id, i, len(chunks), chunk)
+            page_ids = [r["id"] for r in chunk]
+            result = run_review_chunk(chunk, timeout_seconds=timeout_seconds)
+            finish_review_task(task_issue_id, i, len(chunks), page_ids, result)
+            entry = {"chunk_index": i, "page_ids": page_ids, "ok": result["ok"]}
+            if not result["ok"]:
+                entry["error"] = (result.get("stderr") or "")[-2000:] or f"nonzero exit {result.get('returncode')}"
+            results.append(entry)
 
-    result = {
-        "drafts_total": len(rows),
-        "chunks_total": len(chunks),
-        "chunks_failed": sum(1 for r in results if not r["ok"]),
-        "results": results,
-    }
-    if parent_issue_id:
-        finish_review_parent(parent_issue_id, result)
+        result = {
+            "drafts_total": len(rows),
+            "chunks_total": len(chunks),
+            "chunks_failed": sum(1 for r in results if not r["ok"]),
+            "results": results,
+        }
+        if parent_issue_id:
+            finish_review_parent(parent_issue_id, result)
 
-    # Auto-promotion -- every page currently 'reviewed' (this sweep's
-    # approvals plus anything left over from before) goes live now.
-    # promote_reviewed_pages() reports its own Linear issue ("Pushed to
-    # Live" state) and refreshes the pending-drafts board itself, so no
-    # separate board-refresh call is needed here anymore.
-    result["promotion"] = promote_reviewed_pages()
-    return result
+        # Auto-promotion -- every page currently 'reviewed' (this sweep's
+        # approvals plus anything left over from before) goes live now.
+        # promote_reviewed_pages() reports its own Linear issue ("Pushed to
+        # Live" state) and refreshes the pending-drafts board itself, so no
+        # separate board-refresh call is needed here anymore.
+        result["promotion"] = promote_reviewed_pages()
+        return result
+    except Exception:
+        fail_review_parent(parent_issue_id, traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":
