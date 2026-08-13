@@ -40,7 +40,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from mcp_server.db import query as db_query, query_one as db_query_one
+from mcp_server.db import query as db_query, query_one as db_query_one, use_database
 from mcp_server import redaction
 from mcp_server.employees import EMPLOYEE_TOOLS, EMPLOYEE_WRITE_TOOLS, tool_defs as employee_tool_defs
 from mcp_server.asset_writes import ASSET_WRITE_TOOLS, create_asset_tool_def, update_asset_tool_def
@@ -663,7 +663,7 @@ def _tool_defs(enable_employee_tools=False, asset_write_scope=None):
 
 
 def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), enable_employee_tools=False,
-                  identity_name=None, asset_write_scope=None):
+                  identity_name=None, asset_write_scope=None, database=None):
     """Builds a fresh Server instance whose tier-filtered tools are all
     bound to `clearance`. Each identity (stdio/local, or one HTTP/SSE
     secret path) gets its OWN Server instance from this -- clearance is
@@ -702,7 +702,17 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
         slug-restriction could safely narrow.
     Like `changed_by` above, both `changed_by` and the slug restriction are
     bound here via functools.partial, never taken from the tool call's own
-    arguments."""
+    arguments.
+
+    database: None (default -- live eoxs_wiki, every existing identity) or
+    "staging" (routes every query this identity's tools make, read AND
+    write, to eoxs_wiki_staging instead -- see mcp_server/db.py's
+    use_database()/ContextVar). Used exclusively by the `staging_qa`
+    identity (http_server.py), a QA sandbox for testing employee/asset
+    write behavior without any risk to live data, and structurally
+    invisible to wiki_ingestion (which only ever calls
+    ingestion.db.get_live_conn(), never touches eoxs_wiki_staging at all --
+    confirmed by grep, zero references anywhere in wiki_ingestion/)."""
     tools = {
         tool_name: (functools.partial(func, clearance=clearance) if tool_name in TIER_FILTERED_TOOLS else func)
         for tool_name, func in TOOLS.items()
@@ -733,7 +743,8 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
             return [TextContent(type="text", text=f"Unknown tool: {tool_name}")]
         func = tools[tool_name]
         try:
-            result = func(**(arguments or {}))
+            with use_database(database):
+                result = func(**(arguments or {}))
         except Exception as e:
             result = {"error": f"{type(e).__name__}: {e}"}
         else:

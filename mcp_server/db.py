@@ -2,8 +2,22 @@
 table -- execute() below is the one exception, added specifically for the
 employees table (mcp_server/employees.py), the first write path this MCP
 server has ever had. Every other tool in this codebase only ever calls
-query()/query_one()."""
+query()/query_one().
+
+2026-08-13: get_conn() can target a different physical database per MCP
+identity -- added for the `staging_qa` identity (see server.py's
+build_server() `database` param), which needs every read/write tool to
+transparently hit eoxs_wiki_staging instead of live eoxs_wiki, with zero
+changes to any individual tool function in employees.py/asset_writes.py/
+server.py. A ContextVar is the mechanism: build_server()'s call_tool()
+wrapper sets it for the duration of exactly one tool invocation (via
+use_database() below), every query()/query_one()/execute() call made
+during that invocation picks it up automatically through get_conn(), and
+it's reset immediately after -- no tool function needed a new parameter.
+Default (unset) behavior is unchanged: os.environ["PGDATABASE"] (live)."""
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import psycopg2
@@ -12,12 +26,31 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+STAGING_DB = os.environ.get("PGDATABASE_STAGING", "eoxs_wiki_staging")
+
+_target_database = ContextVar("target_database", default=None)
+
+
+@contextmanager
+def use_database(name):
+    """name: None (default -- live, unchanged) or "staging" (routes every
+    query()/query_one()/execute() call made inside this block to
+    eoxs_wiki_staging). Always resets on exit, including on exception."""
+    token = _target_database.set(name)
+    try:
+        yield
+    finally:
+        _target_database.reset(token)
+
 
 def get_conn():
+    dbname = os.environ["PGDATABASE"]
+    if _target_database.get() == "staging":
+        dbname = STAGING_DB
     return psycopg2.connect(
         host=os.environ["PGHOST"],
         port=os.environ["PGPORT"],
-        dbname=os.environ["PGDATABASE"],
+        dbname=dbname,
         user=os.environ["PGUSER"],
         password=os.environ["PGPASSWORD"],
         cursor_factory=psycopg2.extras.RealDictCursor,

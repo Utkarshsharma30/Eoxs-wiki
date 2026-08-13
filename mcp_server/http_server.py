@@ -58,6 +58,26 @@ update_asset ONLY, and only for `SALARY_ASSET_SLUG` ('eoxs-salary-details')
 -- any other slug is refused with a plain permission error. general/intern
 get neither tool. See schema/032_asset_change_log.sql.
 
+2026-08-13: a 5th identity, `staging_qa`, exists purely for QA-testing
+write behavior (does the model create/update the right rows, does it ever
+touch something it shouldn't) with zero risk to live data. Full clearance,
+every read tool, both employee and asset write tools fully unrestricted --
+but every single tool call this identity makes, read or write, is
+transparently routed to the eoxs_wiki_staging DATABASE instead of live
+eoxs_wiki (see mcp_server/db.py's use_database()/ContextVar and
+server.py's build_server() `database` param). This is NOT the `wiki_staging`
+SCHEMA that live drafts sit in before promotion (schema/017's comment) --
+it's the other, unrelated "staging" concept: a full separate physical
+database eoxs_wiki_staging, which wiki_ingestion has no code path to reach
+at all (confirmed by grep: zero references to get_staging_conn/
+PGDATABASE_STAGING anywhere in wiki_ingestion/). A write through this
+identity can therefore never reach the wiki-ingestion pipeline, structurally,
+not just by policy. Every write is also tagged `changed_by='staging_qa'` in
+employee_change_log/asset_change_log, so QA activity is trivially
+distinguishable from anything else. See loaders/reset_staging_qa_data.py to
+wipe staging's employees/assets tables and re-mirror them from live for a
+clean slate between QA sessions.
+
 Run with: python -m mcp_server.http_server  (dev, binds 127.0.0.1 only)
 Deployed via systemd as eoxs-mcp.service, reverse-proxied by nginx at
 https://5.223.44.95/mcp/<secret>/sse -- nginx passes /mcp/ through
@@ -103,8 +123,11 @@ IDENTITIES = [
     # the same reason enable_employee_tools is: these are the only two
     # write surfaces in the whole server, deliberately gated identity-by-
     # identity, never by the read-side tier system.
-    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True, "all"),
-    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {SALARY_ASSET_SLUG}),
+    # 7th element: database -- None (live, every real identity) or
+    # "staging" (staging_qa only -- routes every tool call to
+    # eoxs_wiki_staging, see mcp_server/db.py's use_database()).
+    ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True, "all", None),
+    ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {SALARY_ASSET_SLUG}, None),
     # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
     # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
     # dollar figure alongside otherwise-relevant general content, and general
@@ -114,15 +137,25 @@ IDENTITIES = [
     # figure (including payroll -- unlike hr's non_payroll_monetary_amounts
     # carve-out); employee_activity_monitoring keeps Cattr/performance data
     # HR+full-only regardless of the wider tier clearance (see redaction.py).
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None),
-    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False, None),
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None, None),
+    ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False, None, None),
+    # staging_qa: full clearance, every read tool, BOTH write tool sets
+    # fully unrestricted (unlike hr's real-world restrictions -- there's
+    # nothing to protect here, it's disposable test data) -- but database=
+    # "staging" means every single call, read or write, hits
+    # eoxs_wiki_staging, never live. Deliberately not documented in any of
+    # the 4 main skill files -- this identity is for direct hands-on QA by
+    # whoever holds the secret, not for a persistent claude.ai connector
+    # meant to answer real questions. See deploy/eoxs-wiki-db-skill-staging-qa.md.
+    ("staging_qa", os.environ["MCP_STAGING_URL_SECRET"], FULL_CLEARANCE, (), True, "all", "staging"),
 ]
 
 
-def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), enable_employee_tools=False, asset_write_scope=None):
+def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), enable_employee_tools=False, asset_write_scope=None, database=None):
     mcp_server_instance = build_server(
         clearance, name=f"eoxs-wiki-db-{identity_name}", extra_redact_categories=extra_redact_categories,
         enable_employee_tools=enable_employee_tools, identity_name=identity_name, asset_write_scope=asset_write_scope,
+        database=database,
     )
     sse = SseServerTransport(f"{MOUNT_PREFIX}/{secret}/messages/")
 
@@ -145,8 +178,8 @@ def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), e
 
 routes = [
     route
-    for identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope in IDENTITIES
-    for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope)
+    for identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope, database in IDENTITIES
+    for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope, database)
 ]
 
 app = Starlette(routes=routes)

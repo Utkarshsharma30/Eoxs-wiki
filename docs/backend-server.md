@@ -83,14 +83,15 @@ HR_CLEARANCE      = ["tier2_confidential", "tier2"]
 GENERAL_CLEARANCE = ["tier2"]
 ```
 
-`http_server.py` creates **four separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
+`http_server.py` creates **five separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
 
-| Identity | Secret env var | Clearance | Extra redaction | Employee tools? | Asset write? |
-|---|---|---|---|---|---|
-| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) | create + update, any slug |
-| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) | update only, `eoxs-salary-details` only |
-| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No | No |
-| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No | No |
+| Identity | Secret env var | Clearance | Extra redaction | Employee tools? | Asset write? | Database |
+|---|---|---|---|---|---|---|
+| `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) | create + update, any slug | live |
+| `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) | update only, `eoxs-salary-details` only | live |
+| `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No | No | live |
+| `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No | No | live |
+| `staging_qa` | `MCP_STAGING_URL_SECRET` | `FULL_CLEARANCE` | none | Yes, unrestricted | Yes, unrestricted | **staging** |
 
 ### 5.1 Employee directory tools (2026-08-12) — the first write path
 
@@ -115,9 +116,21 @@ Every write is logged to `asset_change_log` (schema/032) — full old/new title 
 
 **Why no extra pipeline work was needed to keep the wiki fresh**: `wiki_ingestion/detect.py`'s `candidates_assets()` (built 2026-08-12 for the one-time backfill) already watches `assets.updated_at` against a stored cursor and content-hashes the result — it has no way to distinguish "changed by a script" from "changed by a live tool call." A `create_asset`/`update_asset` call is simply a new way to advance `updated_at` on a row that partition was already watching. The next scheduled `eoxs-wiki-pipeline.timer` run (every 6 hours) picks up any asset write automatically and re-drafts the corresponding wiki page — exactly the behavior asked for, with zero changes to `wiki_ingestion/`.
 
+### 5.3 `staging_qa` (2026-08-13) — a QA sandbox for the two write paths above, isolated by database, not just by data
+
+Both write features above (§5.1, §5.2) needed a way to test real create/update/delete behavior — does the model create the right row, does it ever touch something it shouldn't, does an update actually take — without any of that risking live data or getting swept into the wiki. `staging_qa` is a 5th HTTP identity that gets full clearance and every tool, read and write, completely unrestricted (there's nothing to protect in disposable test data) — but with one difference from every other identity: **every single tool call it makes is transparently routed to the `eoxs_wiki_staging` database instead of live `eoxs_wiki`.**
+
+**Mechanism** (`mcp_server/db.py`): a `contextvars.ContextVar` (`_target_database`), defaulting to unset (live, unchanged behavior for every other identity). `build_server()` takes a new `database` param (`None` or `"staging"`); its `call_tool()` handler wraps each dispatched tool call in `with use_database(database):` before invoking it. Because every existing tool function — all 20 read tools, `employees.py`'s 7, `asset_writes.py`'s 2 — already funnels through `mcp_server/db.py`'s `query()`/`query_one()`/`execute()`, this required editing **only `db.py` and the one wrapper line in `call_tool()`** — zero changes to any individual tool function's signature or body.
+
+**Why a write through this identity can never reach the wiki, structurally, not just by policy**: `wiki_ingestion/` has no code path to the physical `eoxs_wiki_staging` database at all — confirmed by grep, zero references to `get_staging_conn`/`PGDATABASE_STAGING` anywhere in that directory. (This is a different "staging" than the `wiki_staging` *schema* draft-review pages sit in before promotion, §9 of `docs/postgres-database.md` — that one lives inside live `eoxs_wiki` itself; `eoxs_wiki_staging` is an entirely separate physical database, historically used only for raw-ingestion fetcher testing via `dual_write()`, see `docs/raw-ingestion.md` §4.) Since the wiki pipeline only ever calls `ingestion.db.get_live_conn()`, a row that only ever existed in `eoxs_wiki_staging` is simply invisible to it — not filtered out, not excluded by a flag, just unreachable.
+
+**Distinguishing QA writes and cleaning up**: every write through this identity is tagged `changed_by='staging_qa'` in `employee_change_log`/`asset_change_log` (the same construction-time-bound `changed_by` mechanism §5.1/§5.2 already use), so `SELECT * FROM employee_change_log WHERE changed_by='staging_qa'` (run against staging) shows exactly what a QA session wrote. For actually resetting the sandbox, `loaders/reset_staging_qa_data.py --commit` is a full wipe-and-remirror: it truncates staging's `employees`/`assets`/both change-log tables and re-copies every row (preserving `id`) from live — a clean, deterministic baseline regardless of what QA did (new fabricated rows, edited existing ones, anything), rather than trying to mechanically replay each change log entry backwards. It only ever reads from live and writes to staging; verified live-untouched by direct query before this went live.
+
+Deliberately **not** documented in any of the four main skill files (`deploy/eoxs-wiki-db-skill*.md`) — this identity is for direct hands-on testing by whoever holds the secret, not a persistent claude.ai connector meant to answer real questions. See `deploy/eoxs-wiki-db-skill-staging-qa.md` instead.
+
 One-off import: `loaders/import_employees_from_xlsx.py` merges EOXS's multi-sheet HR spreadsheet into one canonical row per person (deduped by name, then by shared email — catches same-person/different-spelling cases like "Dhrup" vs "Dhrup Kumar"). Deliberately excludes LinkedIn URLs, personal phone numbers, and — most importantly — a plaintext-password column present in the source sheet, never imported regardless of how this table gets used later.
 
-A **5th** `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE)`) exists purely for local stdio transport — always full clearance, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway.
+One more `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE, enable_employee_tools=True, identity_name="full", asset_write_scope="all")`) exists purely for local stdio transport — always full clearance and live database, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway. Not one of the five HTTP identities above — a separate, sixth `Server` object, for a different transport entirely.
 
 **The redaction safety net** (`mcp_server/redaction.py`): runs on every tool call for every identity except `full`. Independent of the SQL-level tier filter — it inspects the actual text of what's about to be returned and strips anything matching a restricted category, catching cases where the original tier classification was wrong. Uses Sonnet (not Haiku), redacts by exact verbatim span removal (never regenerates text), fails closed on repeated API error. Every actual redaction is logged to `mcp_redaction_log` (schema 023) for follow-up.
 
@@ -128,7 +141,7 @@ A **5th** `Server` instance (`server.py`'s module-level `server = build_server(F
 **Tool count: 20** tiered/read-only tools, present for every identity:
 `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
 (`list_assets`/`search_assets`/`get_asset` added 2026-08-12 alongside the new `assets` table — see `docs/raw-ingestion.md` §2 Assets. `get_asset` returns the full raw document; the corresponding wiki page under `wiki/sources/assets/` is a synthesized summary, not a substitute for the original text.)
-Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`hr` — **29 tools total** for `full` (20 + 7 + 2), **28** for `hr` (20 + 7 + 1, no `create_asset`), still **20** for `general`/`intern`.
+Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`hr` — **29 tools total** for `full` (20 + 7 + 2), **28** for `hr` (20 + 7 + 1, no `create_asset`), still **20** for `general`/`intern`. `staging_qa` (§5.3) also sees **29** (unrestricted, like `full`) but every one of them targets `eoxs_wiki_staging`, not live.
 
 `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
 

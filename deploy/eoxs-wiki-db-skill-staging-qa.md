@@ -1,0 +1,98 @@
+---
+name: eoxs-wiki-db-staging-qa
+description: QA sandbox for testing Cruz's write functionality (employee directory, internal reference documents) against a disposable staging database — not the real company data. Use whenever someone is deliberately testing create/update/delete behavior, checking for hallucinated writes, or otherwise verifying these tools work correctly before trusting them against live.
+---
+
+# EOXS Data — Session Skill (Staging QA Sandbox)
+
+**This connector is a test sandbox, not the real EOXS second brain.** Every
+tool here reads from and writes to `eoxs_wiki_staging` — a separate physical
+database from the live one every other Cruz connector uses. Nothing you see
+here is guaranteed current or real; nothing you write here reaches live data,
+the real wiki, or any other Cruz connector. It exists specifically so writes
+can be tested — created, updated, deliberately gotten wrong — with zero real
+consequence and a one-command way back to a clean baseline.
+
+**Say this plainly at the start of the session, once:** you're connected to
+the staging QA sandbox, not production — anything read or written here is
+test-scoped. Don't repeat this disclaimer every message, but don't let the
+user forget it either if the conversation drifts toward treating a result as
+real company information.
+
+---
+
+## 1. What's here — same tools as `full`, same behavior expected
+
+This connector intentionally mirrors the `full` (Raj) identity's full tool
+set and behavior rules, unrestricted — the whole point of QA is testing the
+*real* production write path, not a simplified stand-in for it. If something
+here behaves wrong, that's a real bug in the same code the live connectors
+run.
+
+**Read** (20 tools) — `get_index`, wiki (`search_wiki`/`get_wiki_page`),
+emails, calls, assets (`list_assets`/`search_assets`/`get_asset`), clients,
+implementation tasks. Same shapes and same call patterns as the other skill
+files — see any of them for the full per-tool reference if needed.
+
+**Employee directory** (7 tools) — `list_employees`/`search_employees`/
+`get_employee` (read), `create_employee`/`update_employee`/
+`deactivate_employee`/`reactivate_employee` (write). No restrictions.
+
+**Internal reference documents** (2 write tools on top of the 3 read tools
+above) — `create_asset(slug, title, body)`, `update_asset(slug, body,
+title)`. No restrictions — unlike the real `hr` connector, this one can
+create new documents and edit any slug, including the salary register.
+`update_asset` still replaces the entire body, not a single line — fetch the
+current text with `get_asset` first if only testing a partial correction.
+
+---
+
+## 2. What QA testing actually means here
+
+The person using this connector is deliberately probing whether the write
+tools behave correctly — creates the right row, updates only what was asked,
+never touches something it wasn't told to, doesn't hallucinate a write that
+was never requested. Support that directly:
+
+- **State plainly what you're about to write before calling a write tool,
+  the same as you would on the real connectors** — this is exactly the
+  behavior being tested, so don't skip it "because it's just staging."
+- **Never write speculatively or as a side effect of a read request.** A bug
+  where a write happens without being asked for is the single most important
+  thing this sandbox exists to catch — don't paper over it by being more
+  cautious here than you'd be for real; behave exactly as you would on `full`.
+- **After a write, report exactly what the tool returned** — the actual row,
+  not a paraphrase — so the person testing can directly compare it against
+  what they asked for.
+- If a write fails or returns something unexpected (wrong field changed,
+  wrong slug, an error), say so plainly and show the raw result. Don't retry
+  or "fix" it silently — a surprising result during QA is signal, not noise.
+
+---
+
+## 3. Resetting the sandbox
+
+You don't run this yourself — it's a server-side admin command
+(`loaders/reset_staging_qa_data.py --commit`), not an MCP tool. If asked
+whether staging can be reset or whether test data needs cleaning up, say
+that's done outside this connector, by whoever administers the server — not
+something you can trigger. If someone describes staging as "messy" from
+prior testing, that's expected and not something you need to fix through
+these tools; a full reset is a separate deliberate step.
+
+---
+
+## 4. What this connector is not
+
+- Not a source of real information about EOXS employees, SOPs, or company
+  data — the underlying rows are periodically wiped and re-copied from live,
+  and get freely mutated during testing in between. Never answer a real
+  business question using this connector; redirect to the actual `full`/`hr`/
+  `general`/`intern` connectors for that.
+- Not wiki-ingested, ever — nothing written here can reach the synthesized
+  wiki or any live table, regardless of how long it sits unwritten-over.
+- Not rate-limited or access-tiered in any way that matters for testing —
+  full clearance, no redaction, no slug restrictions. If the goal is
+  specifically testing `hr`'s salary-only restriction or `general`/`intern`'s
+  redaction behavior, use those real connectors instead — this one won't
+  reproduce those limits.

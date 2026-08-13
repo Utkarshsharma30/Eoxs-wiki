@@ -54,6 +54,28 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   re-drafted into the wiki by the next scheduled 6-hour cycle automatically — no pipeline
   changes were needed. **Tool totals**: `full` 29 (20 read + 7 employee + 2 asset-write),
   `hr` 28 (20 + 7 + 1), still 20 for `general`/`intern`.
+- **5th MCP identity added 2026-08-13: `staging_qa`** — a QA sandbox for testing the
+  employee/asset write tools above without any risk to live data. Not a new write surface
+  (still only `employees`/`assets`, nothing else) — the same two tool sets, unrestricted,
+  but every single tool call this identity makes (read AND write) is transparently routed
+  to the `eoxs_wiki_staging` **database** instead of live `eoxs_wiki`, via a new
+  `mcp_server/db.py` ContextVar (`use_database()`) that `build_server()`'s `database` param
+  sets for the duration of one tool call — required editing only `db.py` and one line in
+  `call_tool()`, zero changes to any of the ~29 individual tool functions. A write through
+  this identity structurally cannot reach the wiki-ingestion pipeline (confirmed by grep:
+  `wiki_ingestion/` has zero references to `get_staging_conn`/`PGDATABASE_STAGING` — it only
+  ever calls `get_live_conn()`). Every write is tagged `changed_by='staging_qa'` in
+  `employee_change_log`/`asset_change_log` for easy identification;
+  `loaders/reset_staging_qa_data.py --commit` wipes staging's `employees`/`assets`/both
+  change-logs and re-mirrors `employees`/`assets` from live for a clean baseline between
+  sessions. **Not documented in any of the 4 main skill files** — see the dedicated
+  `deploy/eoxs-wiki-db-skill-staging-qa.md` instead. Full detail:
+  `docs/backend-server.md` §5.3.
+- **Do not confuse `eoxs_wiki_staging` (a separate physical database, used for raw-ingestion
+  dual-write testing AND now `staging_qa`) with `wiki_staging` (a schema living inside LIVE
+  `eoxs_wiki`, the draft-review workspace wiki pages sit in before promotion)** — two
+  genuinely different things sharing a similar name; see `docs/postgres-database.md` §9.
+  `wiki_ingestion/` only ever touches the latter.
 - **Gmail accounts are now DB-backed, not hardcoded `.env` triplets** (`oauth_accounts` table,
   2026-08-12) — `raj_gmail`/`ron_gmail`/`remya_gmail` migrated over unchanged (same behavior:
   remya excluded from the recurring sweep via `raw_sweep_enabled=false`, not a name check

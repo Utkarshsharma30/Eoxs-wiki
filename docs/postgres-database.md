@@ -316,7 +316,9 @@ No other application-relevant roles exist (the rest are Postgres 16's built-in `
 
 ## 8. Staging database (`eoxs_wiki_staging`)
 
-Purpose: a **complete physical mirror**, used exclusively as a safety net for testing raw-ingestion changes (new fetchers, schema tweaks, bug fixes) against realistic data with zero risk to the live database. Every raw-ingestion write goes through `dual_write()` (see `docs/raw-ingestion.md` §4), which writes to both databases in one call, live-mandatory / staging-best-effort.
+Purpose: a **complete physical mirror**, used as a safety net for testing raw-ingestion changes (new fetchers, schema tweaks, bug fixes) against realistic data with zero risk to the live database. Every raw-ingestion write goes through `dual_write()` (see `docs/raw-ingestion.md` §4), which writes to both databases in one call, live-mandatory / staging-best-effort.
+
+**2026-08-13, second purpose added**: also backs the `staging_qa` MCP identity (`docs/backend-server.md` §5.3) — a full-clearance, unrestricted-writes sandbox for QA-testing the `employees`/`assets` write tools without any risk to live data. `mcp_server/db.py`'s `use_database()` transparently routes that one identity's every tool call here instead of live; `wiki_ingestion/` has no code path to this database at all (confirmed by grep), so nothing written here can ever reach the wiki pipeline. `loaders/reset_staging_qa_data.py --commit` wipes this database's `employees`/`assets`/both change-log tables and re-mirrors `employees`/`assets` from live for a clean QA baseline.
 
 Table structure is **exactly identical** to live (same 2 schemas, same extensions, zero table-list diff). Row counts largely match for raw tables (email_threads, tickets, call_transcripts, implementation_tasks, sales_orders all identical or within a few rows — normal in-flight lag), but several things are **deliberately never dual-written** to staging:
 
