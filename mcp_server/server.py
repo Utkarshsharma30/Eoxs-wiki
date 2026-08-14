@@ -260,15 +260,31 @@ def list_assets(clearance=FULL_CLEARANCE):
 
 
 def search_assets(query, clearance=FULL_CLEARANCE):
-    """ILIKE, not full-text -- like search_implementation_tasks, this table
-    has no tsvector column (a handful of long documents, not worth the
-    machinery full-text search on emails/calls/wiki needs)."""
+    """Trigram-similarity-ranked (pg_trgm), not full-text -- like
+    search_implementation_tasks, this table has no tsvector column (a
+    handful of long documents, not worth the machinery full-text search on
+    emails/calls/wiki needs). 2026-08-14: switched from a flat ILIKE list to
+    similarity()-scored ranking specifically so a vague/approximate
+    reference (e.g. "AI Joe product SOP" when no asset is literally titled
+    that) returns a real confidence signal -- match_score -- instead of an
+    unordered list with no way to tell a strong match from a coincidental
+    one. A body ILIKE hit (the document merely CONTAINS the query
+    somewhere) adds a small, fixed bonus (+0.15, capped at 1.0) on top of
+    title similarity rather than replacing it -- an earlier version used a
+    flat floor instead of a bonus, which flattened every body-containing
+    document to the identical score for a short/generic query (e.g. "SOP"
+    matched 10 of 15 documents' bodies, all tying at the floor value) and
+    lost real, meaningful ranking differences between them. The additive
+    form keeps documents with the term actually IN THE TITLE ranked above
+    ones that merely mention it somewhere in a long body."""
     return db_query(
-        """SELECT id, slug, title, access_tier
+        """SELECT id, slug, title, access_tier,
+                  round(LEAST(1.0, similarity(title, %s) + CASE WHEN body ILIKE %s THEN 0.15 ELSE 0 END)::numeric, 3) AS match_score
            FROM assets
-           WHERE (title ILIKE %s OR body ILIKE %s) AND access_tier::text = ANY(%s)
-           ORDER BY title LIMIT 20""",
-        (f"%{query}%", f"%{query}%", clearance),
+           WHERE access_tier::text = ANY(%s)
+             AND (similarity(title, %s) > 0.1 OR body ILIKE %s)
+           ORDER BY match_score DESC LIMIT 20""",
+        (query, f"%{query}%", clearance, query, f"%{query}%"),
     )
 
 
@@ -606,8 +622,11 @@ def _tool_defs(enable_employee_tools=False, asset_write_scope=None):
         ),
         Tool(
             name="search_assets",
-            description="Search internal reference documents by title or body content (substring match, not "
-                        "full-text). Use list_assets for the full catalog instead.",
+            description="Search internal reference documents by title (fuzzy/approximate match, ranked) or "
+                        "body content (substring). Results are sorted by 'match_score' (0-1, title-similarity "
+                        "based) -- a clear top score well above the rest means a confident match; several "
+                        "close scores means genuine ambiguity between documents. Use list_assets for the full "
+                        "catalog instead.",
             inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
         ),
         Tool(

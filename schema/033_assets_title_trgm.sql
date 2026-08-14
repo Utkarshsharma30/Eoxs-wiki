@@ -1,0 +1,14 @@
+-- Fuzzy/trigram search support for assets.title, matching the same
+-- gin_trgm_ops pattern wiki_pages/tickets already use
+-- (idx_wiki_pages_title_trgm, idx_tickets_subject_trgm). Added for
+-- search_assets()'s new similarity()-ranked matching (mcp_server/server.py)
+-- -- a real, live UX gap this closes: a vague reference like "AI Joe
+-- product SOP" (no asset literally titled that) previously returned an
+-- unordered ILIKE list with no way to tell a strong match from a weak one,
+-- so a write-tool caller had no signal beyond "ask the user." Trigram
+-- similarity gives a real numeric confidence score instead. Not
+-- performance-critical at 15 rows (a sequential scan computing
+-- similarity() is trivial at this table size) -- added for consistency
+-- with the rest of this schema and to not need revisiting if this table
+-- ever grows.
+CREATE INDEX idx_assets_title_trgm ON assets USING gin (title gin_trgm_ops);

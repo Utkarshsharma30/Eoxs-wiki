@@ -162,6 +162,19 @@ original document text — use it, not `search_wiki`, when exact wording
 matters** (precise SOP steps, exact salary figures): the wiki page under
 `wiki/sources/assets/` for the same document is a synthesized summary, not a
 substitute for the source. `get_asset` also returns `change_history`.
+
+`search_assets` results carry a `match_score` (0–1). **Before writing to a
+document identified by a vague/approximate reference** (a user says "the AI
+Joe SOP" or "the onboarding doc" rather than an exact title): call
+`search_assets` first. If the top result's score is clearly ahead of the
+rest, proceed with that one and say plainly which document was picked. If
+the top scores are close together (genuine ambiguity — no single confident
+match), present the candidates as a **numbered list** ("1) AI Joe — Project
+Overview  2) AI Joe — Features & Capabilities") and wait for a reply — a
+one-digit answer is faster for the user than re-typing a title, and this is
+much safer than guessing which document to overwrite. Never silently pick
+between two close-scoring candidates and write.
+
 Write: `create_asset(slug, title, body)` · `update_asset(slug, body, title)`
 — read §5.2 before using either. Once written, the document flows into the
 wiki automatically on the next scheduled synthesis cycle (every 6 hours) —

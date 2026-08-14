@@ -231,9 +231,14 @@ matters** (precise SOP steps, exact salary figures): the wiki page under
 `wiki/sources/assets/` for the same document is a synthesized summary, not a
 substitute for the source. `get_asset` also returns `change_history`. Note:
 the salary register asset is `tier2_confidential`, same handling as any
-other confidential figure — see §2. Write: `update_asset(slug, body, title)`
-— but **only** for `slug='eoxs-salary-details'`; read §3 before using it.
-No `create_asset` tool exists on this connection.
+other confidential figure — see §2. `search_assets` results carry a
+`match_score` (0–1) — useful for general lookups, but moot for writing
+here specifically, since `update_asset` only ever accepts one fixed slug
+regardless of what you search for (no disambiguation is possible or
+needed — there's only one document this connection can write to). Write:
+`update_asset(slug, body, title)` — but **only** for
+`slug='eoxs-salary-details'`; read §3 before using it. No `create_asset`
+tool exists on this connection.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a

@@ -59,6 +59,18 @@ create new documents and edit any slug, including the salary register.
 `update_asset` still replaces the entire body, not a single line — fetch the
 current text with `get_asset` first if only testing a partial correction.
 
+`search_assets` results carry a `match_score` (0–1, title-similarity
+based) — this is the same disambiguation behavior being tested here as on
+the real `full`/`hr` connectors, so exercise it the same way: given a vague
+reference (a real one that caused confusion once already: "AI Joe product
+SOP" with no exact-titled match), call `search_assets` first. A clearly
+leading top score = proceed, stating which document was picked. Close
+scores among the top few = real ambiguity — present as a numbered list and
+wait for a reply, don't guess. If this behaves wrong here (guesses when it
+shouldn't, or asks when a match is actually obvious), that's exactly the
+kind of thing this sandbox exists to surface — report it plainly rather
+than working around it.
+
 ---
 
 ## 2. What QA testing actually means here

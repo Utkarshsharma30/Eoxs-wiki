@@ -42,6 +42,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 030 | `030_source_account_text.sql` | Converts `email_threads.source_account` from a fixed enum to `TEXT` — a rigid enum meant every new self-serve-connected account needed a schema migration before its first write. |
 | 031 | `031_assets.sql` | `assets` — new raw source category for curated internal reference documents (SOPs, company overview, ICP, salary register, etc.) migrated from `raj-wiki-vault`'s file-based pipeline. The corresponding wiki pages were already here (`wiki_pages.source_file_path` still reads `wiki/sources/assets/...`) but the raw layer never was, leaving their `wiki_citations` permanently `unresolved` until this. See `docs/raw-ingestion.md` and `ingestion/import_assets.py`. |
 | 032 | `032_asset_change_log.sql` | `asset_change_log` — audit trail for `create_asset`/`update_asset` (the second and, per explicit instruction, last write-capable table in this server, alongside `employees`). See `docs/backend-server.md` §5.2. |
+| 033 | `033_assets_title_trgm.sql` | `idx_assets_title_trgm` — trigram index backing `search_assets`'s `similarity()`-ranked matching (`match_score` in its results). |
 
 ## 2. Every table, grouped logically
 
@@ -254,7 +255,7 @@ asset_change_log: id serial PK, asset_id int NOT NULL FK->assets,
 
 Every FK column has a supporting btree index (60+ total across the database), plus:
 
-- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`, `idx_employees_name_trgm`
+- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`, `idx_employees_name_trgm`, `idx_assets_title_trgm` (schema/033, 2026-08-14 — backs `search_assets`'s `similarity()`-ranked matching, see `docs/backend-server.md` §5.2)
 - **Full-text search (GIN, tsvector):** `idx_email_messages_tsv`, `idx_wiki_pages_tsv`, `idx_call_transcripts_tsv`
 - **Partial indexes:** `idx_call_transcripts_api_natural_key` (UNIQUE on `(source, external_id) WHERE source_file_path IS NULL`); `idx_wiki_links_unresolved` (`wiki_links(to_title_raw) WHERE to_page_id IS NULL`)
 - **`access_tier`** is plain-btree indexed (not GIN) on every table that has it: `email_threads`, `call_transcripts`, `tickets`, `implementation_tasks`, `sales_orders`, `wiki_pages`, `wiki_staging.wiki_pages`
