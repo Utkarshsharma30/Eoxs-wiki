@@ -20,7 +20,18 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
    and a troubleshooting section built from real mistakes made setting this up.
 9. **`docs/training/`** — intern/new-hire orientation video scripts.
 
-## Current state, as of 2026-08-13 — the things most likely to matter immediately
+## Current state, as of 2026-08-14 — the things most likely to matter immediately
+
+- **`_environment` field added to every write-tool result (2026-08-14)** — a real incident,
+  not preventive-only: a `staging_qa` session with no skill file attached had zero factual
+  basis to know it was in the sandbox (nothing in ANY tool result said so, only skill-file
+  text did) and nearly asked the user to approve a write it wrongly believed was live.
+  Nothing was actually written anywhere in that session — verified directly against both
+  databases — but the belief was wrong. Now every write tool's result (all 4 employee +
+  both asset tools, every identity, success or error alike) carries a server-asserted
+  `_environment` string saying plainly which database it hit — stamped in `call_tool()`
+  after redaction, never something a caller or a missing skill file can spoof or omit. See
+  `docs/backend-server.md` §5.4.
 
 - **4 MCP identities**, not 3: `full` (Raj, everything), `hr` (confidential + general,
   payroll visible, every other dollar amount stripped), `general` (confidential + general,

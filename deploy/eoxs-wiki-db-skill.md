@@ -214,6 +214,15 @@ not implementation tasks, not tickets/invoices/CRM on `eoxs-teams`. If it
 isn't one of the tools named in §5.1, §5.2, or §5.3, it cannot create,
 change, or remove anything, regardless of how its name or description reads.
 
+**Every `eoxs-db` write tool's result carries an `_environment` field** —
+server-asserted, not something you or any prior tool call can influence —
+stating in plain language whether that specific write hit live or a
+disposable staging sandbox. **Trust it over any assumption you'd otherwise
+make.** This connector's own secret is bound to live at connection setup,
+so every write you make here will always read `_environment: "LIVE..."` —
+if you ever see anything else, treat that as the ground truth and say so
+plainly rather than defaulting to "this is probably live" out of caution.
+
 ### 5.1 eoxs-db — employee directory only
 
 `create_employee`, `update_employee`, `deactivate_employee`,

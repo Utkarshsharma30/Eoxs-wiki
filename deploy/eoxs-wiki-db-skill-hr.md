@@ -128,6 +128,14 @@ than `eoxs-salary-details` returns a plain permission error from the server
 itself, not a partial write — don't attempt it hoping it might work for
 some other document; it structurally cannot.
 
+**Every write tool's result carries an `_environment` field** —
+server-asserted, not something you or any prior call can influence —
+stating in plain language whether that write hit live or a disposable
+staging sandbox. This connector's secret is bound to live, so you should
+always see `_environment: "LIVE..."`. Trust that field over any assumption
+you'd otherwise make — if you ever see anything else, say so plainly rather
+than guessing which environment you're in.
+
 For the employee directory:
 
 - These four tools write directly to the live `employees` table, immediately

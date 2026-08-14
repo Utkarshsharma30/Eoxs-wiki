@@ -491,6 +491,22 @@ TIER_FILTERED_TOOLS = {
     "get_implementation_task",
 }
 
+# 2026-08-14: every tool call in this set gets an unmissable "_environment"
+# field stamped onto its result (see call_tool() below) -- real, live
+# confusion this fixes: a caller connected to `staging_qa` with no skill
+# file attached (so no prompt-level context telling it this was the
+# sandbox) reasoned from nothing but its own caution that it must be on
+# live, and nearly asked the user to approve a write it believed would hit
+# production -- it never actually wrote anything (verified directly against
+# both databases afterward), but the *belief* was wrong, and every prior
+# tool result gave it zero factual basis to know better. Every OTHER tool
+# in this server is silent about which database it hit, by original design
+# (skill files were meant to carry that context) -- this stamp exists
+# specifically on the write path, where getting this wrong has real stakes,
+# so a model never has to trust an attached skill file (easy to omit or
+# mismatch) over the ground truth the server itself already knows.
+WRITE_TOOL_NAMES = EMPLOYEE_WRITE_TOOLS | set(ASSET_WRITE_TOOLS)
+
 TOOLS = {
     "get_index": get_index,
     "get_wiki_page": get_wiki_page,
@@ -758,6 +774,19 @@ def build_server(clearance, name="eoxs-wiki-db", extra_redact_categories=(), ena
                 result = await redaction.check_and_redact(
                     result, clearance, tool_name, clearance_name=name, extra_categories=extra_redact_categories,
                 )
+        if tool_name in WRITE_TOOL_NAMES and isinstance(result, dict):
+            # Stamped last, after redaction, so it's never at risk of being
+            # touched by it -- this field is server-asserted ground truth,
+            # not caller-provided or model-generated, and must reach the
+            # model unmodified on every single call, success or error alike.
+            result["_environment"] = (
+                f"STAGING (eoxs_wiki_staging via the '{identity_name or name}' identity) -- "
+                "test data. This write is NOT live, will NEVER reach production, and will "
+                "NEVER be picked up by wiki-ingestion."
+                if database == "staging" else
+                f"LIVE (eoxs_wiki via the '{identity_name or name}' identity) -- this write is "
+                "real and reaches production."
+            )
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     return srv
