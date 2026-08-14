@@ -349,7 +349,17 @@ Current real status counts in `wiki_staging.wiki_pages` (229 total): **4 draft**
 
 Two ways, both already set up:
 
-1. **Web-based read-only browser** (pgweb) — reachable at `https://5.223.44.95/dbadmin/`, protected by an nginx basic-auth username/password. Nothing to install. Already connected as `eoxs_readonly`, so it's read-only end to end regardless of what you try to type into it.
-2. **A full SQL client** (pgAdmin, DBeaver, etc.) via an SSH tunnel to the VPS — needs SSH access to `5.223.44.95` as user `deploy`, plus a Postgres username/password. Full querying power (read-write if connecting as `eoxs_app`, read-only if connecting as `eoxs_readonly`).
+1. **Web-based read-only browser** (pgweb) — reachable at `https://5.223.44.95/dbadmin/` for **live**, or `https://5.223.44.95/dbadmin-staging/` for **staging** (added 2026-08-14 alongside the `staging_qa` MCP identity, specifically so its write-tool testing can be visually confirmed against real rows, not just a tool's own returned JSON) — both protected by the same nginx basic-auth username/password. Nothing to install. Both connect as `eoxs_readonly`, so both are read-only end to end regardless of what you try to type into either.
+2. **A full SQL client** (pgAdmin, DBeaver, etc.) via an SSH tunnel to the VPS — needs SSH access to `5.223.44.95` as user `deploy`, plus a Postgres username/password. Full querying power (read-write if connecting as `eoxs_app`, read-only if connecting as `eoxs_readonly`) against either database (`eoxs_wiki` or `eoxs_wiki_staging`).
 
 Contact **Ayan** for credentials for either path.
+
+**`eoxs_readonly` on staging** needed its own one-time grant to work at all — unlike live, it had `CONNECT` (via the `PUBLIC` pseudo-role, never explicitly revoked there the way it was on live per `docs/handoff-access-tier-dev.md` §1) but zero table-level `SELECT` grants until 2026-08-14. Run once, directly as `eoxs_app` (which owns every table in both databases — no superuser needed):
+```sql
+GRANT USAGE ON SCHEMA public TO eoxs_readonly;
+GRANT USAGE ON SCHEMA wiki_staging TO eoxs_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO eoxs_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA wiki_staging TO eoxs_readonly;
+ALTER DEFAULT PRIVILEGES FOR ROLE eoxs_app IN SCHEMA public GRANT SELECT ON TABLES TO eoxs_readonly;
+ALTER DEFAULT PRIVILEGES FOR ROLE eoxs_app IN SCHEMA wiki_staging GRANT SELECT ON TABLES TO eoxs_readonly;
+```

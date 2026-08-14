@@ -1,0 +1,37 @@
+[Unit]
+Description=eoxs-wiki-db STAGING read-only database browser (pgweb)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/eoxs-wiki-db
+EnvironmentFile=/home/deploy/eoxs-wiki-db/.env
+# Exact sibling of pgweb.service (port 8092, eoxs_wiki live) -- same
+# read-only enforcement, same eoxs_readonly role, same --readonly/
+# --lock-session flags, same nginx-basic-auth layer in front (see
+# nginx-https.conf's /dbadmin-staging/ location) -- pointed at
+# eoxs_wiki_staging instead, on its own port (8095) so both can run at
+# once. Added 2026-08-14 alongside the staging_qa MCP identity
+# (mcp_server/http_server.py) specifically so QA testing of the
+# employees/assets write tools has a way to visually confirm exactly what
+# changed in staging, not just trust the tool's own returned JSON.
+#
+# eoxs_readonly needed a fresh grant to reach this database at all --
+# unlike eoxs_wiki, it previously had CONNECT (via the PUBLIC pseudo-role,
+# never revoked here the way it was on live) but zero table-level SELECT
+# grants. Granted directly as eoxs_app (which owns every table in both
+# databases) -- see docs/backend-server.md's pgweb section for the exact
+# GRANT statements, run once, not part of any migration file since this is
+# a role/privilege change, not a schema change.
+ExecStart=/home/deploy/eoxs-wiki-db/bin/pgweb --bind=127.0.0.1 --listen=8095 --url=postgres://eoxs_readonly:${PGWEB_DB_PASSWORD}@localhost:5432/eoxs_wiki_staging --readonly --lock-session --auth-user=dbadmin --auth-pass=${PGWEB_HTTP_PASSWORD} --skip-open
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eoxs-pgweb-staging
+
+[Install]
+WantedBy=multi-user.target

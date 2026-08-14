@@ -20,6 +20,7 @@ All app-level systemd units live in `deploy/` in the repo (installed as `/etc/sy
 | `eoxs-wiki-pipeline.service` | oneshot, `TimeoutStartSec=infinity` | `python3 -m wiki_ingestion.run_pipeline` | triggered by its timer |
 | `eoxs-wiki-pipeline.timer` | timer | triggers the above | `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours |
 | `pgweb.service` | simple, `Restart=always` | `pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin ...` | always-on |
+| `pgweb-staging.service` | simple, `Restart=always` | same as above, port **8095**, `--url=...@localhost:5432/eoxs_wiki_staging` | always-on, added 2026-08-14 |
 | `nginx.service` | system-provided | reverse proxy (see §4) | always-on |
 
 A sibling system, `eoxssecondbrain/eoxs-frontend-threads` (a separate repo, its own clone at `/home/deploy/eoxs-frontend-threads`, its own venv, its own `eoxs-frontend-threads.service`), runs on this same physical box but is **not** part of this repo's codebase — deliberately split out so raw frontend-chat-thread volume never bloats this system, same reasoning as `claude-notes-vault`'s split from `raj-wiki-vault`. It has its own dedicated `eoxs_frontend_threads` database on this same Postgres instance.
@@ -59,6 +60,7 @@ Two-phase design, both phases kept in `deploy/`:
   - **Port 443** (`ssl default_server`): cert/key at `/etc/letsencrypt/live/5.223.44.95/fullchain.pem` / `privkey.pem`. Three location blocks:
     - `location /mcp/` → `proxy_pass http://127.0.0.1:8091` (no trailing slash, deliberately — the SSE app bakes `/mcp` into its own self-referential URLs). `proxy_buffering off`, `proxy_read_timeout 3600s`, HTTP/1.1 — all SSE-streaming-specific settings.
     - `location /dbadmin/` → `proxy_pass http://127.0.0.1:8092/` (pgweb, trailing slash strips the prefix). Protected by nginx `auth_basic` against `/etc/nginx/.htpasswd_dbadmin` — a third independent layer on top of pgweb's own `--readonly`/`--lock-session` flags and the `eoxs_readonly` Postgres role's SELECT-only grants.
+    - `location /dbadmin-staging/` → `proxy_pass http://127.0.0.1:8095/` (added 2026-08-14) — exact sibling of the above, browsing `eoxs_wiki_staging` instead via a separate `pgweb-staging.service` instance. Same auth_basic credentials, same three-layer read-only enforcement.
     - `location /` → `proxy_pass http://127.0.0.1:8090` (the ingestion server, catch-all).
 
 `deploy/reload-nginx.sh` is installed as a certbot deploy-hook (`/etc/letsencrypt/renewal-hooks/deploy/`) — it runs `systemctl reload nginx` automatically after every successful renewal so nginx always serves the current cert. Automatic renewal itself is confirmed live via `snap.certbot.renew.timer`.
