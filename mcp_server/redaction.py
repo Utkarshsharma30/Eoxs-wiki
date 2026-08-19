@@ -184,8 +184,26 @@ or an employee is mentioned in it -- it has to actually match one of the categor
 Tool response:
 {content}
 
-Respond with ONLY a JSON array of exact substrings to redact, e.g. ["exact text one", "exact text two"].
-If nothing needs redaction, respond with exactly: []"""
+Respond with a JSON object of the form {{"spans": ["exact text one", "exact text two"]}},
+where "spans" is the list of exact substrings to redact.
+If nothing needs redaction, respond with exactly: {{"spans": []}}"""
+
+# apex 2026-08-19: structured-outputs schema -- guarantees valid JSON from the
+# checker. Kills both failure modes seen live 2026-08-18: (a) truncated JSON on
+# span-heavy content ("Unterminated string"), (b) occasional prose/non-JSON
+# responses ("Expecting value: char 0") -> 3 retries -> fail-closed blocks.
+_SPANS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "spans": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact verbatim substrings to redact; empty if none.",
+        }
+    },
+    "required": ["spans"],
+    "additionalProperties": False,
+}
 
 
 def _restricted_tiers(clearance):
@@ -296,6 +314,8 @@ def _parse_spans(raw_text):
             raw = raw[4:]
         raw = raw.strip()
     spans = json.loads(raw)
+    if isinstance(spans, dict):  # apex 2026-08-19: structured-outputs object form {"spans": [...]}
+        spans = spans.get("spans")
     if not isinstance(spans, list):
         raise ValueError(f"expected a JSON list, got {type(spans).__name__}")
     return spans
@@ -345,7 +365,9 @@ async def check_and_redact(result, clearance, tool_name, clearance_name="unknown
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = await client.messages.create(
-                model=_MODEL, max_tokens=2000,
+                model=_MODEL, max_tokens=8000,
+                output_config={"format": {"type": "json_schema", "schema": _SPANS_SCHEMA}},  # apex 2026-08-19: was 2000 -- span-heavy get_email/get_wiki_page JSON got truncated (Unterminated string ~char 3635) -> fail-closed blocks under 6-user load
+                thinking={"type": "disabled"},  # apex 2026-08-18: Sonnet 5 defaults to adaptive thinking when omitted; 2000 max_tokens got eaten by thinking -> no text block -> fail-closed blocks. Revert: delete this line.
                 messages=[{"role": "user", "content": prompt}],
             )
             spans = _parse_spans(_extract_text(resp))
