@@ -1,0 +1,15 @@
+# apex hardening 2026-08-15. TODO: append EOXS office IPs to ignoreip when Ayan provides them.
+# Lives at /etc/fail2ban/jail.local on the live box -- not auto-deployed by
+# any script, hand-applied. Captured here 2026-08-20 so a fresh Droplet
+# provision doesn't silently lose this (see docs/infrastructure-roadmap.md's
+# migration security checklist).
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 161.97.98.156
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+backend  = systemd
+
+[sshd]
+enabled = true
+port    = ssh

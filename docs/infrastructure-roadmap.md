@@ -14,6 +14,16 @@ exists. TLS is currently on a raw-IP Let's Encrypt certificate (short-lived, ~6-
 cycle) — no domain name is pointed at this server yet. Full detail in
 `docs/backend-server.md`.
 
+**Security hardening applied 2026-08-15, after this doc's original phased plan was written**
+(`server_tokens off`, TLS locked to 1.2/1.3, security headers + HSTS, MCP-secret log masking,
+fail2ban + sshd key-only hardening) — done by hand directly on the box, not by any script, and
+until 2026-08-20 not captured anywhere in the repo either. Now tracked in `deploy/HARDENING.md`
+(+ `deploy/nginx.conf`, `deploy/fail2ban-jail.local`) specifically so a fresh DigitalOcean
+Droplet provision doesn't silently lose it — a brand-new box built from `deploy/setup.sh` alone
+would NOT reproduce any of this. Any migration plan below must re-apply it explicitly; see that
+file for the full list and for what's still a manual TODO (the fail2ban `ignoreip` office-IP
+list, for one).
+
 ## Why a migration is even being considered
 
 Not because anything is broken — because the owner is planning to run this same kind of
@@ -156,8 +166,11 @@ Two different things need watching, since they're different failure modes:
   not the end user's IP) — the real lever for "who can use this connector" is per-person URL
   secrets with revocation, which the existing per-identity-secret pattern already extends to
   naturally. Not built.
-- **Known, unresolved bug**: the raw-ingestion sweep still writes new rows to `tickets` (see
-  `docs/raw-ingestion.md` §12) despite tickets being removed from every MCP tool and every
-  historical row deleted — the removal never reached `tickets_fetcher.py`'s registration in
-  the sweep itself. Worth fixing before or during the DO migration, not after — no reason to
-  carry a known bug across a platform move.
+- **RESOLVED 2026-08-12** (was listed here as an unresolved bug): the raw-ingestion sweep
+  used to keep writing new rows to `tickets` after tickets were removed from every MCP tool
+  and every historical row deleted — fixed by commit `3fa4c16`, which removed
+  `tickets_fetcher.py`'s/`invoice_fetcher.py`'s registration from `run_full_sweep()`'s source
+  list. Confirmed live 2026-08-20 by grepping `ingestion/server.py` — no call to either
+  fetcher remains in the sweep path, only historical comments. `docs/raw-ingestion.md` §12
+  and this section both went stale here after the fix landed elsewhere; see
+  `docs/postgres-database.md` §7 for the corroborating row-count note.
