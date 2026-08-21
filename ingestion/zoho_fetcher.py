@@ -174,10 +174,21 @@ class ZohoClient:
         start = 1
         url = f"{MAIL_API_BASE}/accounts/{self.account_id}/messages/search"
         while len(messages) < max_results:
-            resp = self._request(
-                "GET", url,
-                params={"searchKey": "date:", "start": start, "limit": PAGE_SIZE},
-            )
+            # Zoho answers an offset past the end of its searchable window with
+            # 404 rather than an empty result set, so a mailbox whose paging
+            # walks past that boundary would abort the whole account's sweep
+            # (404 is correctly non-retryable in _is_retryable). Treat a 404
+            # *from this paging loop only* as end-of-results; every other call
+            # site still surfaces 404 as a real error.
+            try:
+                resp = self._request(
+                    "GET", url,
+                    params={"searchKey": "date:", "start": start, "limit": PAGE_SIZE},
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    break
+                raise
             data = resp.json().get("data", [])
             if not data:
                 break
