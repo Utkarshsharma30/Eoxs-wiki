@@ -53,6 +53,12 @@ def get_conn():
         dbname=dbname,
         user=os.environ["PGUSER"],
         password=os.environ["PGPASSWORD"],
+        # DigitalOcean Managed Postgres REQUIRES TLS and refuses a plaintext
+        # connection outright. Default "prefer" keeps a local socket/loopback
+        # connection working unchanged (it simply negotiates without TLS), so
+        # this is safe on the droplet and required off it -- set PGSSLMODE=require
+        # in the managed-database environment.
+        sslmode=os.environ.get("PGSSLMODE", "prefer"),
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
 

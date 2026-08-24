@@ -127,6 +127,7 @@ IDENTITIES = [
     # "staging" (staging_qa only -- routes every tool call to
     # eoxs_wiki_staging, see mcp_server/db.py's use_database()).
     ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True, "all", None),
+    ("ayan", os.environ["MCP_AYAN_URL_SECRET"], FULL_CLEARANCE, (), True, "all", None),  # 2026-08-21 apex: Ayan own write-capable identity (mirror of full; changed_by=ayan)
     ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {SALARY_ASSET_SLUG}, None),
     # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
     # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
@@ -188,4 +189,12 @@ app = Starlette(routes=routes)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("MCP_HTTP_PORT", "8091"))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    # 0.0.0.0, not 127.0.0.1: on the droplet nginx proxies to this from the
+    # same host either way, but on a container platform (App Platform) the
+    # load balancer connects from OUTSIDE the container -- a loopback bind
+    # refuses it, the health check fails, and the platform kills the
+    # container as "misbehaving". Binding all interfaces is safe here because
+    # the only public path in either environment is the reverse proxy /
+    # platform ingress, never this port directly.
+    host = os.environ.get("MCP_HTTP_HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)
