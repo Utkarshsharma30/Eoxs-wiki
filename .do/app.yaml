@@ -1,0 +1,440 @@
+# DigitalOcean App Platform spec for eoxs-wiki-db.
+#
+# Import via: DO console -> Apps -> Create -> "Import from App Spec",
+# or: doctl apps create --spec .do/app.yaml
+#
+# SECRETS ARE NOT IN THIS FILE, deliberately. Every value below marked
+# type: SECRET with value "REPLACE_IN_CONSOLE" must be filled in from the
+# DO console (or `doctl apps update`) after import -- never committed here.
+# Non-secret values are checked in so the shape of the deployment is
+# reviewable in git rather than living only in a web form.
+#
+# What this deploys (three components off one repo, NOT one app):
+#   eoxs-mcp        web service  - customer-facing MCP connectors (SSE)
+#   eoxs-ingestion  web service  - webhook receiver + health endpoint
+#   eoxs-sweep      scheduled job - the 2-hourly raw-ingestion sweep
+#
+# What deliberately does NOT live here: eoxs-wiki-pipeline and
+# eoxs-wiki-mcp. Those spawn `claude -p` subprocesses and need a real VPS,
+# not a container platform -- they stay on the droplet. See
+# docs/infrastructure-roadmap.md.
+
+name: eoxs-services-sgp1
+region: sgp
+
+# Shared by every component. Postgres connection details for the managed
+# cluster; PGSSLMODE=require because DO Managed Postgres refuses plaintext.
+envs:
+  - key: PGHOST
+    scope: RUN_TIME
+    value: REPLACE_IN_CONSOLE   # private-eoxs-db-live-cluster-...ondigitalocean.com
+  - key: PGPORT
+    scope: RUN_TIME
+    value: "25060"
+  - key: PGUSER
+    scope: RUN_TIME
+    value: eoxs_app
+  - key: PGPASSWORD
+    scope: RUN_TIME
+    type: SECRET
+    value: REPLACE_IN_CONSOLE
+  - key: PGDATABASE
+    scope: RUN_TIME
+    value: eoxs_wiki
+  - key: PGDATABASE_STAGING
+    scope: RUN_TIME
+    value: eoxs_wiki_staging
+  - key: PGSSLMODE
+    scope: RUN_TIME
+    value: require
+
+services:
+  # ---------------------------------------------------------------- MCP
+  # Reads the database and nothing else -- deliberately gets no Gmail,
+  # Zoho, Odoo, Linear or webhook credentials. Each URL secret is the
+  # credential for one identity (full/hr/general/intern/staging_qa); the
+  # URL path itself is the auth, so these are as sensitive as passwords.
+  - name: eoxs-mcp
+    github:
+      repo: eoxssecondbrain/eoxs-wiki-db
+      branch: main
+      deploy_on_push: true
+    build_command: pip install -r requirements.txt
+    run_command: python -m mcp_server.http_server
+    environment_slug: python
+    instance_size_slug: apps-s-1vcpu-1gb
+    instance_count: 1
+    http_port: 8091
+    routes:
+      - path: /mcp
+    health_check:
+      # No dedicated health route on this app; "/" 404s, which still proves
+      # the process is up and accepting connections.
+      http_path: /
+      initial_delay_seconds: 20
+      period_seconds: 30
+      failure_threshold: 5
+    envs:
+      - key: MCP_HTTP_PORT
+        scope: RUN_TIME
+        value: "8091"
+      - key: MCP_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: MCP_HR_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: MCP_GENERAL_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: MCP_INTERN_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: MCP_STAGING_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      # Read by mcp_server/redaction.py -- the query-time redaction safety
+      # net runs for every identity except `full`, so this is required.
+      - key: CLASSIFIER_ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+
+  # ---------------------------------------------------- Ingestion server
+  # Webhook receiver. These URLs are called by EXTERNAL services (Gmail
+  # Pub/Sub, Fireflies, Fathom) -- if this component's public URL changes,
+  # those registrations must be updated or real-time ingestion silently
+  # stops and the 2-hourly sweep masks it for up to two hours.
+  - name: eoxs-ingestion
+    github:
+      repo: eoxssecondbrain/eoxs-wiki-db
+      branch: main
+      deploy_on_push: true
+    build_command: pip install -r requirements.txt
+    run_command: python -m ingestion.server
+    environment_slug: python
+    instance_size_slug: apps-s-1vcpu-1gb
+    instance_count: 1
+    http_port: 8090
+    routes:
+      - path: /
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 20
+      period_seconds: 30
+      failure_threshold: 5
+    envs:
+      - key: INGESTION_SERVER_PORT
+        scope: RUN_TIME
+        value: "8090"
+      # Must match whatever host actually serves the OAuth callbacks, and
+      # that exact URI must be registered in the Google Cloud and Zoho
+      # consoles or every new connect fails with redirect_uri_mismatch.
+      - key: OAUTH_REDIRECT_BASE_URL
+        scope: RUN_TIME
+        value: https://mcp.askcruz.com
+      - key: INGESTION_WEBHOOK_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: FIREFLIES_WEBHOOK_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: FATHOM_WEBHOOK_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: CLASSIFIER_ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_WEB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_WEB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_WEB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_WEB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      # Legacy per-account Gmail refresh tokens. Still read by
+      # oauth_gmail.py's seed path for the three migrated accounts; the
+      # DB-backed oauth_accounts table is the source of truth for anything
+      # connected since 2026-08-12.
+      - key: RAJ_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: RON_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: REMYA_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: FIREFLIES_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: RON_FATHOM_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      # NOTE: LINEAR_EDB_* are the ones the code actually reads. The
+      # similarly-named LINEAR_API_KEY / LINEAR_TEAM_KEY in the old .env
+      # are stale and unused -- do not carry them over.
+      - key: LINEAR_EDB_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: LINEAR_EDB_TEAM_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GREER_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GREER_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ESS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ESS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: DPS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: DPS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: PPC_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: PPC_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: THREEGM_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: THREEGM_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: SABRE_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: SABRE_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: EOXS_TICKETS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: EOXS_TICKETS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+
+jobs:
+  # ------------------------------------------------------------- Sweep
+  # Replaces eoxs-sweep.timer. Same 2-hourly cadence as the systemd timer
+  # it supersedes. Needs the identical credential set to eoxs-ingestion --
+  # it runs the same fetchers, just on a schedule instead of on a webhook.
+  #
+  # IMPORTANT: do not run this while the droplet's eoxs-sweep.timer is also
+  # enabled. Two schedulers writing the same tables is the parallel-write
+  # problem that already required a merge once.
+  - name: eoxs-sweep
+    kind: CRON
+    schedule: "0 */2 * * *"
+    github:
+      repo: eoxssecondbrain/eoxs-wiki-db
+      branch: main
+      deploy_on_push: true
+    build_command: pip install -r requirements.txt
+    run_command: python -m ingestion.server --sweep
+    environment_slug: python
+    instance_size_slug: apps-s-1vcpu-1gb
+    envs:
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: CLASSIFIER_ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: OAUTH_REDIRECT_BASE_URL
+        scope: RUN_TIME
+        value: https://mcp.askcruz.com
+      - key: GMAIL_OAUTH_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_WEB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GMAIL_OAUTH_WEB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_WEB_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ZOHO_WEB_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: RAJ_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: RON_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: REMYA_GMAIL_REFRESH_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: FIREFLIES_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: RON_FATHOM_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: LINEAR_EDB_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: LINEAR_EDB_TEAM_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GREER_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: GREER_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ESS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: ESS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: DPS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: DPS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: PPC_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: PPC_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: THREEGM_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: THREEGM_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: SABRE_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: SABRE_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: EOXS_TICKETS_ODOO_USERNAME
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
+      - key: EOXS_TICKETS_ODOO_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
