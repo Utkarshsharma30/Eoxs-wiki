@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the eoxs-wiki-db health check hourly
+
+[Timer]
+# Hourly: frequent enough that a stopped timer or a failed run is noticed in
+# about an hour rather than the day it took on 2026-08-20, cheap enough that
+# it costs nothing. Persistent so a reboot does not create a blind window.
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

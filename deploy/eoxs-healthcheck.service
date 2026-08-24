@@ -1,0 +1,21 @@
+[Unit]
+Description=eoxs-wiki-db scheduled-job health check (did the timers run, and did they succeed)
+Documentation=file:///home/deploy/eoxs-wiki-db/deploy/healthcheck.sh
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/deploy/eoxs-wiki-db
+# Runs as root because it reads other units' journals via journalctl. It only
+# ever reads state -- it starts, stops and modifies nothing.
+#
+# Optional dead-man's-switch: create /etc/eoxs-healthcheck.env containing
+#   HEALTHCHECK_PING_URL=https://hc-ping.com/<uuid>
+# and a healthy run pings it. If the ping stops arriving, Healthchecks.io
+# alerts -- which is what catches "the whole box died", something a check
+# running ON that box can never report itself.
+EnvironmentFile=-/etc/eoxs-healthcheck.env
+ExecStart=/home/deploy/eoxs-wiki-db/deploy/healthcheck.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eoxs-healthcheck
