@@ -82,6 +82,14 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: REPLACE_IN_CONSOLE
+      # Required, not optional: http_server.py reads this with os.environ[...],
+      # so the MCP server raises KeyError on startup if it is missing.
+      # Added 2026-08-21 -- Ayan's own write-capable identity (mirrors `full`,
+      # but stamps changed_by=ayan in the audit logs).
+      - key: MCP_AYAN_URL_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_IN_CONSOLE
       - key: MCP_HR_URL_SECRET
         scope: RUN_TIME
         type: SECRET
