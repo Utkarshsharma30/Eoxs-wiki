@@ -7,8 +7,14 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 
 ## Read next, in order
 
+0. **`docs/migration-status.md`** — ⚠️ **START HERE.** The system moved from Hetzner to a
+   DigitalOcean droplet on 2026-08-20 and is mid-re-architecture. That file is the live
+   status: what is done, what is broken, what is left. Several statements further down in
+   *this* file predate the migration — it flags which.
 1. **`ARCHITECTURE.md`** — plain-language overview, no engineering background needed.
 2. **`docs/backend-server.md`** — the server, every service, the MCP tier/redaction system.
+   Describes the **Hetzner** box, which is still live and still the system of record. For
+   the DigitalOcean box see `docs/backend-server-digitalocean.md`.
 3. **`docs/postgres-database.md`** — every table, real current row counts.
 4. **`docs/raw-ingestion.md`** — every data source, and a known live bug (below).
 5. **`docs/wiki-ingestion.md`** — how raw data becomes AI-written pages.
@@ -123,14 +129,20 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   `docs/infrastructure-roadmap.md`.
 - **No backup exists for either database.** No uptime/health monitoring exists. Both have a
   fully specified plan in `docs/infrastructure-roadmap.md`, neither is built.
-- **A DigitalOcean migration is planned but not started** — full phased roadmap in
+- **A DigitalOcean migration HAPPENED on 2026-08-20** (this line previously read "planned
+  but not started"). It was a lift-and-shift onto one droplet, not the hybrid split the
+  roadmap describes; the split is now in progress. Both boxes are currently live and
+  ingesting in parallel — see `docs/migration-status.md` §3 before dumping or restoring
+  anything. Original roadmap in
   `docs/infrastructure-roadmap.md`. The key insight: this can't be a pure PaaS move, because
   the wiki-synthesis pipeline spawns `claude -p` as a subprocess and the box also hosts a
   persistent, interactively-used `claude --teleport` session — that category of work needs a
   real VPS (a Droplet), not a container platform. Only the stateless services (MCP
   connectors, webhook receiver, sweep) move to a PaaS layer.
-- **No domain name yet** — everything is on the raw IP `5.223.44.95`, with a short-lived
-  (~6-day) Let's Encrypt certificate. Real Streamable-HTTP transport support (for non-
+- **No domain name yet** — Hetzner is on the raw IP `5.223.44.95` with a short-lived
+  (~6-day) certificate; the DigitalOcean box uses `68-183-181-25.nip.io` with a normal
+  90-day certificate. `mcp.askcruz.com` is the planned real hostname (note `askcruz.com`
+  itself is a live Vercel site — the frontend — so only a subdomain is in play). Real Streamable-HTTP transport support (for non-
   claude.ai clients, e.g. a custom frontend) is planned alongside getting a domain, not built.
 
 ## Standing practices for this repo

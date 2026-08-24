@@ -2,12 +2,19 @@
 
 *Where this system's hosting stands today, what's been decided about where it's going,
 and what's still open. Written so a fresh session — human or Claude — can pick this up
-with full context, without needing chat history that doesn't exist in this repo. Nothing
-in this document has been executed; it's the plan and the reasoning behind it, kept
-current as decisions get made.*
+with full context, without needing chat history that doesn't exist in this repo.*
+
+> **UPDATE 2026-08-21 — partially executed. Read `docs/migration-status.md` first.**
+> A migration to DigitalOcean happened on 2026-08-20, but as a **lift-and-shift** (one
+> droplet running everything, mirroring Hetzner) rather than the hybrid split this
+> document describes. Phase 1 is therefore effectively done in a different shape, and
+> phases 2-3 (Managed Database, App Platform) are now in progress against a droplet that
+> already exists. Hetzner is **still live and still the system of record**. The reasoning
+> below is unchanged and still correct; only the "not started" status lines are stale.*
 
 ## Current state — plainly
 
+**(Superseded 2026-08-20 — see the banner above; this describes Hetzner, which is still live.)**
 Everything runs on a single Hetzner VPS (`5.223.44.95`, hostname `ubuntu-4gb-sin-1`, 2 vCPU,
 ~4GB RAM, Singapore). No backup exists for either database. No uptime/health monitoring
 exists. TLS is currently on a raw-IP Let's Encrypt certificate (short-lived, ~6-day renewal
@@ -119,7 +126,11 @@ session:
    infrastructure, confirm the Managed Database's automatic backup/PITR settings match what's
    actually wanted.
 
-**Status: not started.** This is the plan, not a log of progress.
+**Status: partially executed, in a different shape than planned.** A DigitalOcean droplet
+was provisioned and everything moved to it on 2026-08-20 as a lift-and-shift — so phase 1
+is done (though the droplet runs all services, not just the Claude-CLI ones), while phases
+2-4 are the current work. Phases 5-8 are untouched. `docs/migration-status.md` is the live
+progress log; this section remains the plan and the reasoning.
 
 ## The backup plan (independent of whether the DO migration happens)
 
@@ -135,7 +146,10 @@ first, this becomes moot (backups included). If it doesn't happen soon, the stan
   not custom deletion code.
 - Not done until a real restore has been tested once, and the restore procedure written down.
 
-**Status: not started.**
+**Status: not started — still the single largest unmitigated risk.** Neither the Hetzner box
+nor the new droplet has ever had a backup. The DigitalOcean Managed Database (in progress as
+of 2026-08-21) makes this a configuration checkbox rather than a build, which is the main
+reliability argument for doing it.
 
 ## Monitoring (independent of the migration, cheap either way)
 
