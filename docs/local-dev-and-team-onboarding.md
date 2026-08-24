@@ -117,7 +117,9 @@ reach it from your laptop is through an SSH tunnel using your existing
 `deploy` SSH access. Run this in its own WSL terminal window and leave it
 running while you work:
 ```bash
-ssh -L 5433:127.0.0.1:5432 deploy@5.223.44.95 -N
+ssh -L 5433:127.0.0.1:5432 deploy@5.223.44.95 -N        # Hetzner (still live)
+# DigitalOcean box instead:
+# ssh -L 5433:127.0.0.1:5432 deploy@68.183.181.25 -N
 ```
 (`5433` avoids clashing with a local Postgres if you ever install one; `-N`
 means "just forward, don't open a shell".)
@@ -171,7 +173,8 @@ next person the same back-and-forth.
   the server are three genuinely different environments that can look
   similar at a glance. Before running anything, check the prompt: it should
   show your laptop's own hostname (e.g. `...@LAPTOP-XXXX`) for local WSL
-  work, or the server's hostname (`...@ubuntu-4gb-sin-1`) if you're
+  work, or the server's hostname (`...@ubuntu-4gb-sin-1` on Hetzner,
+  `...@Live-droplet` on DigitalOcean) if you're
   intentionally inside an SSH session. Commands meant for one, run in the
   other, fail in confusing ways (see the tunnel note below) rather than with
   an obvious "wrong place" error.
@@ -199,7 +202,8 @@ next person the same back-and-forth.
   tunnel (step 5) isn't currently open. It has to run in its own dedicated
   terminal window, stays silent with no prompt while working correctly, and
   does **not** persist once that window is closed — reopen it
-  (`ssh -L 5433:127.0.0.1:5432 deploy@5.223.44.95 -N`, from your laptop, not
+  (`ssh -L 5433:127.0.0.1:5432 deploy@<host> -N` — Hetzner `5.223.44.95` or
+  DigitalOcean `68.183.181.25`; from your laptop, not
   from inside a server session) any time you come back to this after a break.
 - **Pasting the multi-line `GRANT`/`ALTER` block right after `\c
   eoxs_wiki_staging` produces `invalid integer value "..." for connection

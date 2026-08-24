@@ -317,7 +317,8 @@ CREATE TABLE mcp_redaction_log (
 );
 ```
 335 rows as of the last documented count. **View it via pgweb** at
-`https://5.223.44.95/dbadmin/` (basic auth — same credentials as the rest
+`https://5.223.44.95/dbadmin/` — or `https://68-183-181-25.nip.io/dbadmin/` on the
+DigitalOcean box (basic auth — same credentials as the rest
 of the admin surface), table `mcp_redaction_log` — or `psql`/any SQL
 client against live `eoxs_wiki`. A row here means the *original*
 classification was wrong about that specific content — the table exists
@@ -534,7 +535,7 @@ so it's only summarized here for context.
 |---|---|
 | eoxs-wiki-db tier definitions, identities | `mcp_server/server.py` (constants), `mcp_server/http_server.py` (`IDENTITIES`) |
 | eoxs-wiki-db redaction logic | `mcp_server/redaction.py` |
-| eoxs-wiki-db redaction audit log | `mcp_redaction_log` table, live `eoxs_wiki` — pgweb at `https://5.223.44.95/dbadmin/` |
+| eoxs-wiki-db redaction audit log | `mcp_redaction_log` table, live `eoxs_wiki` — pgweb at `https://5.223.44.95/dbadmin/` (Hetzner) or `https://68-183-181-25.nip.io/dbadmin/` (DigitalOcean) |
 | eoxs-wiki-db write audit logs | `employee_change_log`, `asset_change_log` tables, same pgweb |
 | eoxs-wiki-db classification agent | `ingestion/inline_tier_classifier.py` (live, per-row); `wiki_ingestion/promote.py` (wiki pages, citation-MAX, not LLM) |
 | eoxs-frontend-threads tier table | `user_access_tiers`, `eoxs_frontend_threads` DB |

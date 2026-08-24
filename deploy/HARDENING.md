@@ -5,11 +5,25 @@ not via a commit or a setup script — `deploy/setup.sh` predates all of it. Cap
 here 2026-08-20 specifically so a DigitalOcean migration doesn't silently drop it;
 see the migration security checklist in `docs/infrastructure-roadmap.md`.
 
+**Status on the DigitalOcean box (verified 2026-08-21):** the security posture below
+was reproduced successfully — ufw 22/80/443 default-deny, SSH key-only with root and
+password login disabled, fail2ban `sshd` jail active. One item is actually *better*
+there: `deploy` is no longer in the `sudo` group. The nginx section, however, has
+drifted — see the warning under it.
+
 ## nginx (`deploy/nginx.conf`, `deploy/nginx-https.conf`)
 
-Both tracked files are now kept byte-identical to the live
-`/etc/nginx/nginx.conf` and `/etc/nginx/sites-available/eoxs-ingestion` — diff
+Both tracked files were kept byte-identical to the live `/etc/nginx/nginx.conf`
+and `/etc/nginx/sites-available/eoxs-ingestion` **on the Hetzner box** — diff
 against live periodically, since nothing enforces that automatically.
+
+> **⚠️ No longer true on the DigitalOcean box (verified 2026-08-21).**
+> `deploy/nginx-https.conf` still carries `server_name 5.223.44.95` and the
+> Hetzner IP-certificate paths, while the live DigitalOcean config uses
+> `68.183.181.25 68-183-181-25.nip.io`, a normal 90-day certificate, and an
+> extra `location /threads/` block. **The tracked file is not deployable on the
+> new box as-is** — regenerate it from live before using it anywhere. See
+> `docs/backend-server-digitalocean.md` §4 and `docs/migration-status.md`.
 
 - `server_tokens off` — hides the nginx version string from every response.
 - `ssl_protocols TLSv1.2 TLSv1.3` — TLS 1.0/1.1 dropped (apex, 2026-08-15).

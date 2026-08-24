@@ -65,7 +65,12 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
   `/oauth/gmail/callback` (mounted in `ingestion/server.py`), which exchanges the code for a refresh
   token server-side and upserts the `oauth_accounts` row — no `.env` edit, no service restart. The
   account is picked up by the very next sweep automatically. The redirect_uri is
-  `https://5-223-44-95.nip.io/oauth/gmail/callback` (`OAUTH_REDIRECT_BASE_URL` in `.env`) —
+  `https://5-223-44-95.nip.io/oauth/gmail/callback` on Hetzner, or
+  `https://68-183-181-25.nip.io/oauth/gmail/callback` on DigitalOcean
+  (`OAUTH_REDIRECT_BASE_URL` in `.env`; the same base also builds the Zoho
+  callback). Every host that serves this flow must have its exact callback URI
+  registered in the Google Cloud AND Zoho consoles or the connect fails with
+  redirect_uri_mismatch —
   nip.io's wildcard DNS (`<ip>.nip.io` always resolves to `<ip>`, zero setup) stands in for a real
   domain, since Google rejects a raw IP literal as a Web-application client's redirect_uri ("must end
   with a public top-level domain"); see the `deploy/nginx-https.conf` server block for this hostname,

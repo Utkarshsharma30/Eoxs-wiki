@@ -87,7 +87,13 @@ This is a deliberate design choice: the system is trusted to do all the repetiti
 
 This document deliberately stays non-technical. Companion documents in `docs/` go deep on each part of the system for engineers being onboarded to specific work:
 
-- `docs/backend-server.md` — the server itself: what runs on it, how, and where.
+- `docs/migration-status.md` — **current** status of the Hetzner → DigitalOcean move:
+  what is done, what is still open, and what needs deciding. Read this first if you
+  are wondering which server anything actually runs on today.
+- `docs/backend-server.md` — the server itself: what runs on it, how, and where
+  (the Hetzner box, still the system of record).
+- `docs/backend-server-digitalocean.md` — the same, for the DigitalOcean box the
+  system was migrated onto on 2026-08-20.
 - `docs/postgres-database.md` — the database: every table, every relationship, real current data.
 - `docs/raw-ingestion.md` — how data gets fetched from every source and automated.
 - `docs/wiki-ingestion.md` — how raw data becomes AI-written knowledge pages.
