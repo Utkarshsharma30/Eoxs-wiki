@@ -216,6 +216,17 @@ async def health(request):
         "mount_prefix": MOUNT_PREFIX,
         "public_prefix": PUBLIC_PREFIX,
         "route_count": len(routes),
+        # First 6 chars of each registered secret, so a 404 can be traced to a
+        # secret mismatch between platform env and the URL being requested.
+        # 6 chars of a 43-char token is not enough to guess or replay.
+        "route_fingerprints": sorted({
+            seg[:6]
+            for r in routes
+            for seg in [
+                (getattr(r, "path", "") or "")[len(MOUNT_PREFIX):].lstrip("/").split("/")[0]
+            ]
+            if seg and seg not in ("health",)
+        }),
     })
 
 
