@@ -139,8 +139,12 @@ def promote_page(staging_page_id):
                 SELECT t.access_tier::text FROM wiki_citations wc JOIN implementation_tasks t
                   ON wc.source_type = 'implementation_task' AND t.odoo_task_id = wc.source_id
                 WHERE wc.wiki_page_id = %s
+                UNION
+                SELECT t.access_tier::text FROM wiki_citations wc JOIN assets t
+                  ON wc.source_type = 'asset' AND t.id = wc.source_id
+                WHERE wc.wiki_page_id = %s
                 """,
-                (live_id, live_id, live_id, live_id),
+                (live_id, live_id, live_id, live_id, live_id),
             )
             cited_tiers = {row["tier"] for row in cur.fetchall()}
             if "tier1" in cited_tiers:
