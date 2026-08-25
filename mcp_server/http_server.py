@@ -110,7 +110,19 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # otherwise that URL is missing /mcp, the client's POST 404s against
 # nginx's default location (the OTHER app on port 8090), and the session
 # hangs after a successful-looking initial SSE connection.
-MOUNT_PREFIX = "/mcp"
+# Behind nginx the app is reached at /mcp/<secret>/sse and sees that full
+# path, so the prefix is "/mcp". On DigitalOcean App Platform the ingress
+# rule matches prefix /mcp and STRIPS it before forwarding, so the app sees
+# /<secret>/sse instead -- with a hardcoded "/mcp" every route 404s while the
+# health check passes, which is exactly how this presented.
+#
+# MCP_MOUNT_PREFIX therefore configures the path the routes are registered
+# at. It must match what THIS process receives. MCP_PUBLIC_PREFIX separately
+# controls the path advertised to clients in the SSE "endpoint" event (see
+# the note above): on App Platform the routes live at "" but the client must
+# still be told "/mcp", because its POST goes back through the ingress.
+MOUNT_PREFIX = os.environ.get("MCP_MOUNT_PREFIX", "/mcp")
+PUBLIC_PREFIX = os.environ.get("MCP_PUBLIC_PREFIX", MOUNT_PREFIX)
 
 SALARY_ASSET_SLUG = "eoxs-salary-details"
 
@@ -159,7 +171,7 @@ def _make_routes(identity_name, secret, clearance, extra_redact_categories=(), e
         enable_employee_tools=enable_employee_tools, identity_name=identity_name, asset_write_scope=asset_write_scope,
         database=database,
     )
-    sse = SseServerTransport(f"{MOUNT_PREFIX}/{secret}/messages/")
+    sse = SseServerTransport(f"{PUBLIC_PREFIX}/{secret}/messages/")
 
     async def _handle_sse_raw(scope, receive, send):
         async with sse.connect_sse(scope, receive, send) as streams:

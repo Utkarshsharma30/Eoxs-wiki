@@ -80,6 +80,16 @@ services:
       - key: MCP_HTTP_PORT
         scope: RUN_TIME
         value: "8091"
+      # App Platform's ingress matches prefix /mcp and strips it before
+      # forwarding, so this process receives /<secret>/sse -- routes must be
+      # registered with no prefix. The client must still be TOLD /mcp for its
+      # message POSTs, since those go back through the same ingress.
+      - key: MCP_MOUNT_PREFIX
+        scope: RUN_TIME
+        value: ""
+      - key: MCP_PUBLIC_PREFIX
+        scope: RUN_TIME
+        value: /mcp
       - key: MCP_URL_SECRET
         scope: RUN_TIME
         type: SECRET
