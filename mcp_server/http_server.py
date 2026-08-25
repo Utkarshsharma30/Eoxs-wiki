@@ -208,7 +208,15 @@ routes = [
 # given one (it would end up in platform config and logs). Without this,
 # App Platform probes "/" , gets a 404, and kills the container as unhealthy.
 async def health(request):
-    return JSONResponse({"status": "ok"})
+    # Reports the mount prefix and route COUNT so a deployment can be debugged
+    # without a shell and without exposing any secret: never the secrets
+    # themselves, never a full route path (those contain the URL credential).
+    return JSONResponse({
+        "status": "ok",
+        "mount_prefix": MOUNT_PREFIX,
+        "public_prefix": PUBLIC_PREFIX,
+        "route_count": len(routes),
+    })
 
 
 routes.append(Route("/health", endpoint=health, methods=["GET"]))
