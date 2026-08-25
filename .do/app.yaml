@@ -1,3 +1,22 @@
+# ============================ READ BEFORE PUSHING ============================
+# DO NOT run `doctl apps update --spec .do/app.yaml` against a LIVE app.
+#
+# Every SECRET below is a REPLACE_IN_CONSOLE placeholder. A spec push
+# OVERWRITES the real values entered in the console with those placeholders --
+# and DigitalOcean then ENCRYPTS the literal string "REPLACE_IN_CONSOLE", so
+# the console still shows type=SECRET / encrypted and looks perfectly healthy.
+#
+# That exact failure cost several hours on 2026-08-25: all six MCP identities
+# 404'd because every route had been registered under the path
+# /REPLACE_IN_CONSOLE/sse, while /health passed and the deployment reported
+# ACTIVE. Encrypted does NOT mean correct.
+#
+# This file is for CREATING an app (`doctl apps create --spec`) or as a
+# reference for the component/route/env SHAPE. To change structure on a live
+# app, edit that one field in the console, or strip the secret keys out of a
+# copy of this file first.
+# =============================================================================
+
 # DigitalOcean App Platform spec for eoxs-wiki-db.
 #
 # Import via: DO console -> Apps -> Create -> "Import from App Spec",
