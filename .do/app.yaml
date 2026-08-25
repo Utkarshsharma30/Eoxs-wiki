@@ -68,9 +68,11 @@ services:
     routes:
       - path: /mcp
     health_check:
-      # No dedicated health route on this app; "/" 404s, which still proves
-      # the process is up and accepting connections.
-      http_path: /
+      # /health is an unauthenticated liveness route added for exactly this:
+      # every other route here is scoped to a URL secret, and a platform probe
+      # cannot be given one. Probing "/" instead returns 404, which App
+      # Platform treats as unhealthy and kills the container.
+      http_path: /health
       initial_delay_seconds: 20
       period_seconds: 30
       failure_threshold: 5

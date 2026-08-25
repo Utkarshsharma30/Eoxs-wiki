@@ -92,6 +92,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.responses import Response
 
@@ -182,6 +183,18 @@ routes = [
     for identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope, database in IDENTITIES
     for route in _make_routes(identity_name, secret, clearance, extra, enable_employee_tools, asset_write_scope, database)
 ]
+
+# Unauthenticated liveness probe. Deliberately reveals nothing: no identity
+# list, no secrets, no database state -- just proof the process is up and
+# accepting connections. Needed because every other route on this app is
+# scoped to a URL secret, and a container platform's health check cannot be
+# given one (it would end up in platform config and logs). Without this,
+# App Platform probes "/" , gets a 404, and kills the container as unhealthy.
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
+
+routes.append(Route("/health", endpoint=health, methods=["GET"]))
 
 app = Starlette(routes=routes)
 
