@@ -27,7 +27,7 @@ region: sgp
 envs:
   - key: PGHOST
     scope: RUN_TIME
-    value: REPLACE_IN_CONSOLE   # private-eoxs-db-live-cluster-...ondigitalocean.com
+    value: private-eoxs-db-live-cluster-do-user-42137371-0.d.db.ondigitalocean.com
   - key: PGPORT
     scope: RUN_TIME
     value: "25060"
