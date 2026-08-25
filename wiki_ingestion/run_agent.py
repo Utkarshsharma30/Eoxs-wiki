@@ -52,6 +52,8 @@ def _row_summary(row, source_kind):
         return f"- implementation task odoo_task_id={row['odoo_task_id']}: {row.get('task_name', '')} (stage: {row.get('stage', '')})"
     if source_kind == "calls":
         return f"- call id={row['id']} ({row.get('source', '')}): {row.get('meeting_title', '')}"
+    if source_kind == "assets":
+        return f"- asset id={row['id']} slug={row.get('slug', '')}: {row.get('title', '')}"
     return f"- email thread id={row['id']}: {row.get('subject', '')}"  # email accounts
 
 
