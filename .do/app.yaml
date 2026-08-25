@@ -86,7 +86,7 @@ services:
       # message POSTs, since those go back through the same ingress.
       - key: MCP_MOUNT_PREFIX
         scope: RUN_TIME
-        value: ""
+        value: "none"
       - key: MCP_PUBLIC_PREFIX
         scope: RUN_TIME
         value: /mcp

@@ -121,7 +121,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # controls the path advertised to clients in the SSE "endpoint" event (see
 # the note above): on App Platform the routes live at "" but the client must
 # still be told "/mcp", because its POST goes back through the ingress.
-MOUNT_PREFIX = os.environ.get("MCP_MOUNT_PREFIX", "/mcp")
+# Note the sentinel: App Platform silently DROPS an env var whose value is the
+# empty string, so `MCP_MOUNT_PREFIX: ""` never arrives and the default wins --
+# which is why the first attempt at this still 404'd. "none" is therefore the
+# way to ask for "no prefix at all".
+_raw_mount = os.environ.get("MCP_MOUNT_PREFIX", "/mcp")
+MOUNT_PREFIX = "" if _raw_mount.lower() in ("none", "empty", "/") else _raw_mount
 PUBLIC_PREFIX = os.environ.get("MCP_PUBLIC_PREFIX", MOUNT_PREFIX)
 
 SALARY_ASSET_SLUG = "eoxs-salary-details"
