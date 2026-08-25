@@ -304,8 +304,9 @@ jobs:
   # enabled. Two schedulers writing the same tables is the parallel-write
   # problem that already required a merge once.
   - name: eoxs-sweep
-    kind: CRON
-    schedule: "0 */2 * * *"
+    kind: SCHEDULED
+    schedule:
+      cron: "0 */2 * * *"
     github:
       repo: eoxssecondbrain/eoxs-wiki-db
       branch: main
