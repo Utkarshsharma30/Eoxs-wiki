@@ -10,7 +10,7 @@ shapes, and choosing the right one is most of the work.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, **plus the employee directory** | 29 tools: 20 read-only + 7 employee-directory + 2 asset-document writes (see §5.1, §5.2) |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki, internal reference docs, this repo's own docs/architecture/codebase reference, **plus the employee directory** | 32 tools: 23 read-only + 7 employee-directory + 2 asset-document writes (see §5.1, §5.2) |
 | **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 | **teams-askcruz** | The askcruz Odoo project | Raw SQL console **+ 4 write tools** (8 total) |
 
@@ -131,7 +131,7 @@ tools, is covered in §5.3.
 
 ## 4. Tools
 
-### eoxs-db — 29 tools: 20 read-only + 7 employee-directory + 2 asset-writes (§5.1, §5.2)
+### eoxs-db — 32 tools: 23 read-only + 7 employee-directory + 2 asset-writes (§5.1, §5.2)
 
 Every `search_*`/`list_*` result carries an `id`. **Always pass that `id` to the
 matching `get_*`. Never construct or guess a `source_file_path`** — live-ingested
@@ -179,6 +179,17 @@ Write: `create_asset(slug, title, body)` · `update_asset(slug, body, title)`
 — read §5.2 before using either. Once written, the document flows into the
 wiki automatically on the next scheduled synthesis cycle (every 6 hours) —
 no separate "publish" step exists or is needed.
+
+**Repo docs** (this repository's own reference material — every `docs/*.md`
+file, `ARCHITECTURE.md`, and a synthesized codebase-overview document; **you
+are the only identity that can see these** — every row is tier1) — read:
+`search_repo_docs(query)` · `list_repo_docs(doc_type="")` ·
+`get_repo_doc(identifier)`. `doc_type`: `doc` | `architecture` | `codebase` or
+omit for all. `identifier` is the numeric `id` (from list/search) or the
+document's `slug`. Read-only — no write tools exist for this table; it's kept
+in sync by re-running an import script, not edited live. Use this when a
+question is about how *this system itself* works (schema, MCP tools,
+access-tier rules, infra) rather than about EOXS the company.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a

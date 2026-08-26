@@ -19,12 +19,16 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 4. **`docs/raw-ingestion.md`** — every data source, and a known live bug (below).
 5. **`docs/wiki-ingestion.md`** — how raw data becomes AI-written pages.
 6. **`docs/linear-integration.md`** — status reporting to Linear.
-7. **`docs/infrastructure-roadmap.md`** — where hosting is headed (DigitalOcean), what's
-   decided, what's still open. Read this before proposing any infra change — the reasoning
-   for a DO hybrid (not a pure PaaS move) took real back-and-forth to reach.
-8. **`docs/local-dev-and-team-onboarding.md`** — local dev setup, team delegation model,
+7. **`docs/local-dev-and-team-onboarding.md`** — local dev setup, team delegation model,
    and a troubleshooting section built from real mistakes made setting this up.
-9. **`docs/training/`** — intern/new-hire orientation video scripts.
+8. **`docs/training/`** — intern/new-hire orientation video scripts.
+
+`docs/infrastructure-roadmap.md` and `docs/handoff-access-tier-dev.md` were deleted
+2026-08-26 (superseded content — the roadmap's live status lives in
+`docs/migration-status.md`, the handoff doc's setup process lives in
+`docs/local-dev-and-team-onboarding.md`) and re-imported, along with every other file
+listed above plus `ARCHITECTURE.md` and a synthesized codebase overview, into a new
+`repo_docs` table — see the entry below.
 
 ## Current state, as of 2026-08-14 — the things most likely to matter immediately
 
@@ -125,16 +129,14 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 - **`eoxs-frontend-threads` is a separate repo and separate service**
   (`github.com/eoxssecondbrain/eoxs-frontend-threads`), not part of this codebase — deployed
   alongside this system on the same box, own database (`eoxs_frontend_threads`), own venv.
-  Its per-user-secret identity model is an open question — see
-  `docs/infrastructure-roadmap.md`.
-- **No backup exists for either database.** No uptime/health monitoring exists. Both have a
-  fully specified plan in `docs/infrastructure-roadmap.md`, neither is built.
+  Its per-user-secret identity model is an open question — see `docs/migration-status.md`.
+- **No backup exists for either database.** No uptime/health monitoring exists. Neither
+  reliability item is built yet — see `docs/migration-status.md` §4 for the current plan.
 - **A DigitalOcean migration HAPPENED on 2026-08-20** (this line previously read "planned
-  but not started"). It was a lift-and-shift onto one droplet, not the hybrid split the
-  roadmap describes; the split is now in progress. Both boxes are currently live and
+  but not started"). It was a lift-and-shift onto one droplet, not the hybrid split
+  originally planned; the split is now in progress. Both boxes are currently live and
   ingesting in parallel — see `docs/migration-status.md` §3 before dumping or restoring
-  anything. Original roadmap in
-  `docs/infrastructure-roadmap.md`. The key insight: this can't be a pure PaaS move, because
+  anything. The key insight behind the hybrid split: this can't be a pure PaaS move, because
   the wiki-synthesis pipeline spawns `claude -p` as a subprocess and the box also hosts a
   persistent, interactively-used `claude --teleport` session — that category of work needs a
   real VPS (a Droplet), not a container platform. Only the stateless services (MCP
@@ -144,6 +146,18 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
   90-day certificate. `mcp.askcruz.com` is the planned real hostname (note `askcruz.com`
   itself is a live Vercel site — the frontend — so only a subdomain is in play). Real Streamable-HTTP transport support (for non-
   claude.ai clients, e.g. a custom frontend) is planned alongside getting a domain, not built.
+- **New table `repo_docs` (2026-08-26)** — this repository's own `docs/*.md` files,
+  `ARCHITECTURE.md`, and one synthesized codebase-overview document, made queryable through
+  MCP (`list_repo_docs`/`search_repo_docs`/`get_repo_doc`, read-only, no write tools —
+  deliberately, same as every table except `employees`/`assets`). Every row is hardcoded
+  `tier1`, i.e. visible only to `full`/`ayan` (FULL_CLEARANCE) — `hr`/`general`/`intern` get
+  an empty result from all three tools, same mechanism as any other tier1-only content, not a
+  separate restriction. Seeded/kept in sync by re-running
+  `ingestion/import_repo_docs.py` (manual, re-runnable — no ongoing fetcher, same pattern as
+  `ingestion/import_assets.py`). Landed alongside deleting two superseded docs
+  (`docs/infrastructure-roadmap.md`, `docs/handoff-access-tier-dev.md`) — both are excluded
+  from the import since they no longer exist. **Tool totals now**: `full`/`ayan` 32 (23 read +
+  7 employee + 2 asset-write), `hr` 31, `general`/`intern` 23. See `docs/backend-server.md` §5.
 
 ## Standing practices for this repo
 

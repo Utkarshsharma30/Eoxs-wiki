@@ -43,10 +43,11 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 031 | `031_assets.sql` | `assets` — new raw source category for curated internal reference documents (SOPs, company overview, ICP, salary register, etc.) migrated from `raj-wiki-vault`'s file-based pipeline. The corresponding wiki pages were already here (`wiki_pages.source_file_path` still reads `wiki/sources/assets/...`) but the raw layer never was, leaving their `wiki_citations` permanently `unresolved` until this. See `docs/raw-ingestion.md` and `ingestion/import_assets.py`. |
 | 032 | `032_asset_change_log.sql` | `asset_change_log` — audit trail for `create_asset`/`update_asset` (the second and, per explicit instruction, last write-capable table in this server, alongside `employees`). See `docs/backend-server.md` §5.2. |
 | 033 | `033_assets_title_trgm.sql` | `idx_assets_title_trgm` — trigram index backing `search_assets`'s `similarity()`-ranked matching (`match_score` in its results). |
+| 034 | `034_repo_docs.sql` | `repo_docs` — this repository's own `docs/*.md` files, `ARCHITECTURE.md`, and a synthesized codebase-overview document, made queryable through MCP. Every row hardcoded `tier1` (Raj-only) at import time — unlike `assets`, not classified per-document, since the whole category is internal engineering/ops detail. Read-only: no write tools, no change-log table. See `docs/backend-server.md` §5 and `ingestion/import_repo_docs.py`. |
 
 ## 2. Every table, grouped logically
 
-**42 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**43 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
 - **Employee directory:** `employees`, `employee_change_log` — directly-written operational data, deliberately NOT part of the wiki/tiered-content system (no `access_tier` column, never cited by a wiki page, never touched by wiki_ingestion). Gated to the `full` (Raj) and `hr` (Isha) identities only, see `docs/backend-server.md` §5.1.
 - **Reference:** `clients`, `contacts`
@@ -59,6 +60,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
 - **Connected-account credentials:** `oauth_accounts` (per-account Gmail *and Zoho* refresh tokens — `gmail_fetcher.py`/`zoho_fetcher.py`'s `load_accounts()` read this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled; `external_account_id` is Zoho-only, its numeric per-mailbox identifier; `client_type` picks which registered OAuth client to refresh against), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback; `code_verifier` is Gmail-flow-only, PKCE). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
 - **Curated reference docs:** `assets`, `asset_change_log` (SOPs, company overview, ICP, salary register, product-feature specs — see migration 031 above). No `access_tier` uniformity on `assets` — classified per-document, since e.g. the salary register is far more sensitive than a GitLab branching SOP. Alongside `employees`/`employee_change_log`, this is the **only other** table pair in this database with a write path through the MCP server — `full` (any document) and `hr` (the salary register only), see `docs/backend-server.md` §5.2. No other table in this list has, or is planned to have, any write path.
+- **Repo self-reference docs:** `repo_docs` (this repo's own `docs/*.md`, `ARCHITECTURE.md`, and a synthesized codebase overview — see migration 034 above). Every row hardcoded `tier1` (Raj-only), read-only — no write tools, no change-log table (kept in sync by re-running `ingestion/import_repo_docs.py`, not edited live).
 - **`wiki_staging` schema (draft review workspace):** `wiki_staging.wiki_pages`, `wiki_staging.wiki_links`, `wiki_staging.wiki_citations`, `wiki_staging.wiki_flags`
 
 A sibling database, `eoxs_frontend_threads` (same Postgres instance, different logical database), belongs to the separate `eoxs-frontend-threads` repo — not documented here, see that repo's own `README.md`.
@@ -249,16 +251,23 @@ asset_change_log: id serial PK, asset_id int NOT NULL FK->assets,
   change_type text NOT NULL ('created' | 'updated'), changes jsonb (full old/new
   title and body text per change, not just field-level diffs -- see docs/backend-server.md §5.2
   for why a full-text version history is affordable here), occurred_at timestamptz
+
+repo_docs: id serial PK, slug text UNIQUE NOT NULL, title text NOT NULL, body text NOT NULL,
+  doc_type text NOT NULL ('doc' | 'architecture' | 'codebase'), source_file_path text
+  (repo-relative path, provenance only -- NULL for the one synthesized codebase-overview row),
+  access_tier access_tier NOT NULL DEFAULT 'tier1' (hardcoded, never classified per-document --
+  see ingestion/import_repo_docs.py), imported_at/updated_at timestamptz. No change-log table --
+  read-only, no write tools exist for this table.
 ```
 
 ## 4. Indexes
 
 Every FK column has a supporting btree index (60+ total across the database), plus:
 
-- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`, `idx_employees_name_trgm`, `idx_assets_title_trgm` (schema/033, 2026-08-14 — backs `search_assets`'s `similarity()`-ranked matching, see `docs/backend-server.md` §5.2)
+- **Fuzzy/trigram search (GIN, `gin_trgm_ops`):** `idx_email_threads_subject_trgm`, `idx_tickets_subject_trgm`, `idx_wiki_pages_title_trgm`, `idx_employees_name_trgm`, `idx_assets_title_trgm` (schema/033, 2026-08-14 — backs `search_assets`'s `similarity()`-ranked matching, see `docs/backend-server.md` §5.2), `idx_repo_docs_title_trgm` (schema/034, 2026-08-26 — backs `search_repo_docs` the same way)
 - **Full-text search (GIN, tsvector):** `idx_email_messages_tsv`, `idx_wiki_pages_tsv`, `idx_call_transcripts_tsv`
 - **Partial indexes:** `idx_call_transcripts_api_natural_key` (UNIQUE on `(source, external_id) WHERE source_file_path IS NULL`); `idx_wiki_links_unresolved` (`wiki_links(to_title_raw) WHERE to_page_id IS NULL`)
-- **`access_tier`** is plain-btree indexed (not GIN) on every table that has it: `email_threads`, `call_transcripts`, `tickets`, `implementation_tasks`, `sales_orders`, `wiki_pages`, `wiki_staging.wiki_pages`
+- **`access_tier`** is plain-btree indexed (not GIN) on every table that has it: `email_threads`, `call_transcripts`, `tickets`, `implementation_tasks`, `sales_orders`, `wiki_pages`, `wiki_staging.wiki_pages`, `assets`, `repo_docs`
 
 ## 5. Extensions
 
@@ -355,7 +364,7 @@ Two ways, both already set up:
 
 Contact **Ayan** for credentials for either path.
 
-**`eoxs_readonly` on staging** needed its own one-time grant to work at all — unlike live, it had `CONNECT` (via the `PUBLIC` pseudo-role, never explicitly revoked there the way it was on live per `docs/handoff-access-tier-dev.md` §1) but zero table-level `SELECT` grants until 2026-08-14. Run once, directly as `eoxs_app` (which owns every table in both databases — no superuser needed):
+**`eoxs_readonly` on staging** needed its own one-time grant to work at all — unlike live, it had `CONNECT` (via the `PUBLIC` pseudo-role, never explicitly revoked there the way it was on live) but zero table-level `SELECT` grants until 2026-08-14. Run once, directly as `eoxs_app` (which owns every table in both databases — no superuser needed):
 ```sql
 GRANT USAGE ON SCHEMA public TO eoxs_readonly;
 GRANT USAGE ON SCHEMA wiki_staging TO eoxs_readonly;

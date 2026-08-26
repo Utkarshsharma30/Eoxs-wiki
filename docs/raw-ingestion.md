@@ -75,7 +75,7 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
   domain, since Google rejects a raw IP literal as a Web-application client's redirect_uri ("must end
   with a public top-level domain"); see the `deploy/nginx-https.conf` server block for this hostname,
   with its own standard 90-day Let's Encrypt cert (separate from the ~6-day IP-address cert the bare-IP
-  block uses). Swap this for a real subdomain once one exists (`docs/infrastructure-roadmap.md`).
+  block uses). Swap this for a real subdomain once one exists (`docs/migration-status.md` §4).
   Current accounts (as of 2026-08-25): `raj_gmail`, `ron_gmail` (both `raw_sweep_enabled=true`),
   `remya_gmail` (`raw_sweep_enabled=false` — 2026-08-10, one-time historical pull only, not an
   ongoing source), and `isha_gmail` (self-serve connected 2026-08-12, `raw_sweep_enabled=false` —

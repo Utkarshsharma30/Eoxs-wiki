@@ -18,7 +18,10 @@ mounted at its own secret URL path.
 
 Three levels, additive by role (see schema/020_tier2_confidential.sql for
 the full definition):
-  tier1              Raj's own personal data. FULL_CLEARANCE only.
+  tier1              Raj's own personal data, PLUS (2026-08-26) this
+                      repository's own docs/architecture/codebase reference
+                      (repo_docs table) -- internal engineering/ops detail
+                      with no reason to be visible past `full`. FULL_CLEARANCE only.
   tier2_confidential Company-confidential (salary/payroll, investor
                       relations, financial statements, vendor contracts,
                       legal/compliance). FULL_CLEARANCE + HR_CLEARANCE.
@@ -44,6 +47,7 @@ from mcp_server.db import query as db_query, query_one as db_query_one, use_data
 from mcp_server import redaction
 from mcp_server.employees import EMPLOYEE_TOOLS, EMPLOYEE_WRITE_TOOLS, tool_defs as employee_tool_defs
 from mcp_server.asset_writes import ASSET_WRITE_TOOLS, create_asset_tool_def, update_asset_tool_def
+from mcp_server.repo_docs import REPO_DOCS_TOOLS, tool_defs as repo_docs_tool_defs
 
 BODY_PREVIEW_CHARS = 1500  # full body is often 10-50K chars; a preview keeps get_* calls usable
 
@@ -505,6 +509,7 @@ TIER_FILTERED_TOOLS = {
     "list_assets", "search_assets", "get_asset",
     "get_client_profile", "get_client_file", "list_implementation_tasks", "search_implementation_tasks",
     "get_implementation_task",
+    "list_repo_docs", "search_repo_docs", "get_repo_doc",
 }
 
 # 2026-08-14: every tool call in this set gets an unmissable "_environment"
@@ -544,6 +549,7 @@ TOOLS = {
     "list_implementation_tasks": list_implementation_tasks,
     "search_implementation_tasks": search_implementation_tasks,
     "get_implementation_task": get_implementation_task,
+    **REPO_DOCS_TOOLS,
 }
 
 
@@ -687,7 +693,7 @@ def _tool_defs(enable_employee_tools=False, asset_write_scope=None):
                         "list/search_implementation_tasks result.",
             inputSchema={"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
         ),
-    ]
+    ] + repo_docs_tool_defs()
     if enable_employee_tools:
         defs = defs + employee_tool_defs()
     if asset_write_scope == "all":
