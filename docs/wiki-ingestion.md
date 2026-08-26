@@ -17,7 +17,7 @@ wiki_ingestion/
   review.py                          28  Phase 5a: find all draft pages
   run_review.py                      93  Phase 5 driver + prompt (see the known bug, §6)
   review_mcp_server.py              143  Phase 5's sub-agent MCP tool server
-  promote.py                        221  Human-gated promotion + access_tier computation
+  promote.py                        221  Promotion (now automatic post-review) + access_tier computation
   run_pipeline.py                    42  Top-level scheduled entrypoint (3 -> 4 -> 5)
   citation_resolver.py              160  Legacy citation repair, pattern-based (no LLM)
   citation_llm_resolver.py          334  Legacy citation repair, LLM-assisted, two-stage
@@ -66,7 +66,7 @@ Deliberately **exact-title matching, not fuzzy** — verified empirically agains
 
 **Review** (`run_review.py`): one sub-agent per chunk, instructed to read each page, spot-check at least one citation against the real raw source, judge quality, and call exactly one of `mark_reviewed`/`mark_rejected` for **every** page in the batch. See §6 for a known reliability gap here.
 
-### Promotion — human-gated, not run automatically
+### Promotion — automatic immediately after every review sweep (2026-08 change)
 
 `promote.py`'s `promote_page(staging_page_id)` requires `status='reviewed'`, then:
 1. INSERTs into (or UPDATEs) the live `wiki_pages` table.
@@ -74,11 +74,11 @@ Deliberately **exact-title matching, not fuzzy** — verified empirically agains
 3. Computes `access_tier` (see §5).
 4. Marks the staging row `promoted`, records `live_page_id`.
 
-`promote_reviewed_pages()` runs this over every `reviewed` row, then re-resolves any wiki-links that pointed at a page promoted later in the same batch, then reports to Linear. **This is never called by the scheduled pipeline** — it's a deliberate manual step, run by a human when they've decided to actually publish what's accumulated in `reviewed` status.
+`promote_reviewed_pages()` runs this over every `reviewed` row, then re-resolves any wiki-links that pointed at a page promoted later in the same batch, then reports to Linear. **`run_review_sweep()` now calls this automatically at the end of every sweep** — there is no human gate for a page the review sub-agent marked `reviewed`; it goes live within the same cycle, typically well under a minute later. This was a deliberate change (no longer "manual, run by a human when they've decided to publish") — only a `rejected` page still requires a human decision (see `docs/linear-integration.md` §5/§9 for how those two outcomes are now tracked as distinct, filterable Linear states). Live confirmation: `wiki_staging.wiki_pages` currently has **zero** rows sitting in `reviewed` status — every page that clears review is promoted within the same sweep, so pages barely spend any time in that intermediate state.
 
 ### Top-level orchestration (`run_pipeline.py`)
 
-`run_pipeline()` = `run_cycle()` → `run_consolidation_pass()` → `run_review_sweep()`, in that order, one call — exactly what the systemd timer (`deploy/eoxs-wiki-pipeline.timer`, every 6 hours) invokes. Promotion is explicitly excluded from this automatic chain.
+`run_pipeline()` = `run_cycle()` → `run_consolidation_pass()` → `run_review_sweep()`, in that order, one call — exactly what the systemd timer (`deploy/eoxs-wiki-pipeline.timer`, every 6 hours) invokes. Promotion is no longer excluded from this chain — it now runs automatically as the last step inside `run_review_sweep()` itself, for any page that sweep (or an earlier one) marked `reviewed`.
 
 ## 3. How synthesis actually happens (`claude -p` sub-agents)
 
@@ -109,7 +109,7 @@ All three factories build a **fresh `Server` instance per call** (per SSE connec
 
 ## 4. Citations — the mechanism that ties a wiki page back to real data
 
-`wiki_citations(wiki_page_id, source_type, source_id, source_ref_raw)` — same shape in both `public` (live) and `wiki_staging`. `source_type` is one of `email_thread` / `ticket` / `call_transcript` / `implementation_task` for anything newly written (older imported rows also carry legacy values like `unresolved`/`wiki_page`, handled by the two repair scripts below, not by new writes). `source_id` is polymorphic — notably, for `implementation_task` it's the **`odoo_task_id`**, never the internal serial `id`, because that table gets fully refreshed every raw-ingestion sweep.
+`wiki_citations(wiki_page_id, source_type, source_id, source_ref_raw)` — same shape in both `public` (live) and `wiki_staging`. `source_type` is one of `email_thread` / `ticket` / `call_transcript` / `implementation_task` / `asset` for anything newly written (older imported rows also carry legacy values like `unresolved`/`wiki_page`, handled by the two repair scripts below, not by new writes). `source_id` is polymorphic — notably, for `implementation_task` it's the **`odoo_task_id`**, never the internal serial `id`, because that table gets fully refreshed every raw-ingestion sweep. Note `add_staging_citation` (in `agent_mcp_server.py`) does not validate `source_type` against this list — it's a plain INSERT, so a sub-agent could in principle write an unrecognized value; §5's access_tier query only recognizes the five listed here.
 
 **Verification is entirely model-driven, not SQL-driven** — the Review phase's prompt tells the sub-agent to call `get_staging_page`, then use matching read tools (`get_ticket`, `get_email`, etc.) to confirm each citation is accurate. There is no deterministic/SQL-level "does this citation's target actually exist and say what the page claims" check anywhere in the driver code (`review.py`/`run_review.py`) — it's fully delegated to the model's own tool-call reasoning during that sub-agent session.
 
@@ -127,8 +127,11 @@ SELECT t.access_tier::text FROM wiki_citations wc JOIN email_threads t
 UNION SELECT ... FROM call_transcripts ...
 UNION SELECT ... FROM tickets ...
 UNION SELECT ... FROM implementation_tasks t ON t.odoo_task_id = wc.source_id ...
+UNION SELECT ... FROM assets t ON t.id = wc.source_id ...
 ```
 then: `tier1` if any citation is tier1, else `tier2_confidential` if any is that, else `tier2`. One salary figure cited anywhere on a page is enough to restrict the entire page. A known collision risk: implementation-task citations key on `odoo_task_id`, which isn't unique across different clients — the join fails closed (whichever candidate, across any client sharing that id number, is most restrictive wins).
+
+**2026-08-25 fix**: the `assets` branch above was missing entirely until this date — added after a health audit found 32 live `wiki_citations` rows already using `source_type='asset'` (the assets ingestion path has been writing them since 2026-08-12) with no corresponding join, meaning a page citing only assets — including either of the two `tier2_confidential` assets (`eoxs-client-implementation-go-live-sop`, `eoxs-salary-details`) — would silently compute an empty `cited_tiers` set and default to the least-restrictive `tier2`. No page was actually mis-tiered by this in practice (the 3 asset-sourced pages promoted before the fix all happened to cite only `tier2` assets), but the gap was live and unguarded. Fixed in `wiki_ingestion/promote.py`.
 
 A **separate** classifier, `tier_classifier.py`, exists purely for the ~1,046 legacy pages imported before `promote.py` existed (whose citations are mostly unresolved, so the citation-max approach alone can't classify most of them). It runs an LLM content-classification pass first (fail-closed to `tier1` on error), then two SQL-only backstop passes that only ever *tighten* a tier, never loosen it: one upgrading from resolved raw citations, one propagating tier along wiki-page-cites-wiki-page links to a fixed point.
 
@@ -160,15 +163,17 @@ Phase 4/5 have no DB-side "running" bookkeeping row the way `wiki_ingest_cycles`
 
 `deploy/eoxs-wiki-pipeline.timer`: `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours. `deploy/eoxs-wiki-pipeline.service` sets `TimeoutStartSec=infinity` deliberately (a single batch can take 3–5+ minutes, a full run can span hours — systemd's default ~90s oneshot timeout would otherwise kill it mid-run). It now depends on `deploy/eoxs-wiki-mcp.service` (`After=`/`Wants=`) — the persistent HTTP MCP server every sub-agent invocation connects to (see §3, §6) must be up first. `eoxs-wiki-mcp.service` is `Restart=always`, matching `eoxs-mcp.service`'s pattern for the external connector.
 
-## 8. Current real pipeline state (as of 2026-08-13)
+## 8. Current real pipeline state (as of 2026-08-25)
 
-`wiki_staging.wiki_pages` status counts: **483 draft** (cycle 47 alone, still running — see §6.1, triggered by a full historical Zoho backfill for a newly-connected account, ~3,600 threads, processed 25/batch sequentially), **0 reviewed**, **21 rejected**, **404 promoted** (908 total). Live `wiki_pages`: **1,348** total (39 tier1 / 753 tier2_confidential / 556 tier2). `wiki_ingest_cycles` has reached **47** total cycles (cycle 46 failed — see §6.1 — cycle 47 in progress).
+`wiki_staging.wiki_pages` status counts: **1,153 promoted**, **51 rejected**, **0 draft**, **0 reviewed**. Zero rows sitting in `draft` or `reviewed` is expected now, not a sign of a stall — see §2's Promotion section: a page clears `draft` → `reviewed` → `promoted` within the same review sweep, so those two intermediate states are normally empty between sweeps. Live `wiki_pages`: **1,866** total (50 tier1 / 1,096 tier2_confidential / 720 tier2). `wiki_ingest_cycles` has reached **98** total cycles.
 
-This is a substantial change from an earlier snapshot of this document, which recorded only 2 pages ever promoted against 210 sitting in `reviewed` — a large backlog that had been silently stuck (traced to an unpopped `git stash` from 2026-08-04 that had, among other things, removed `promote.py` from the working tree entirely). Once recovered and re-run, the full `reviewed` backlog cleared in one pass with zero failures — the pipeline itself was always healthy; the promotion step just wasn't reachable for several days. Current state reflects a fully caught-up system, not an unusually quiet one.
+Treat any numeric snapshot in this section (including this one) as a point-in-time reading, not a maintained fact — it goes stale within days on a system this active. Query `wiki_staging.wiki_pages`/`public.wiki_pages`/`wiki_ingest_cycles` directly, or check the live "pending drafts" Linear board (`docs/linear-integration.md` §9), for the current numbers.
+
+**History**: an earlier snapshot of this document recorded only 2 pages ever promoted against 210 sitting in `reviewed` — a large backlog that had been silently stuck (traced to an unpopped `git stash` from 2026-08-04 that had, among other things, removed `promote.py` from the working tree entirely). Once recovered and re-run, the full `reviewed` backlog cleared in one pass with zero failures. Promotion was later made fully automatic (see §2), which is why `reviewed` no longer accumulates a backlog at all.
 
 ## 9. Linear reporting hook
 
-2026-08 redesign — see `docs/linear-integration.md` for the full mechanism. Every phase now creates a **parent** Linear issue the moment it starts (not after it finishes) and one **child** Linear task per actual sub-agent invocation — one per Phase 3 chunk, one per Phase 4 duplicate group, one per Phase 5 review chunk — created right before that specific `claude -p` call and updated immediately after with its real, full outcome: exactly which rows/pages it was given, and either the complete body text of every page it touched or a specific, non-generic failure reason (never a bare "failed"). `promote_reviewed_pages()` still reports a single summary issue per promotion batch (unchanged — promotion is manual and infrequent, doesn't need per-page sub-issues), and the persistent "pending drafts" board (§ same as before) still refreshes on every review sweep regardless of what that sweep did.
+2026-08 redesign — see `docs/linear-integration.md` for the full mechanism. Every phase now creates a **parent** Linear issue the moment it starts (not after it finishes) and one **child** Linear task per actual sub-agent invocation — one per Phase 3 chunk, one per Phase 4 duplicate group, one per Phase 5 review chunk — created right before that specific `claude -p` call and updated immediately after with its real, full outcome: exactly which rows/pages it was given, and either the complete body text of every page it touched or a specific, non-generic failure reason (never a bare "failed"). `promote_reviewed_pages()` still reports a single summary issue per promotion batch (one issue per automatic promotion run, not per-page — see §2 for why this now runs after every review sweep rather than manually/infrequently), and the persistent "pending drafts" board (§ same as before) still refreshes on every review sweep regardless of what that sweep did.
 
 ## 10. Code vs. AI split
 

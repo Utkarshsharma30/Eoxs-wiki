@@ -85,15 +85,18 @@ HR_CLEARANCE      = ["tier2_confidential", "tier2"]
 GENERAL_CLEARANCE = ["tier2"]
 ```
 
-`http_server.py` creates **five separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
+`http_server.py` creates **six separate `Server` instances**, one per identity, each mounted at its own long-random-secret URL path segment — the URL path itself is the credential (no OAuth, no auth header). As of 2026-08-11, `general` was widened from tier2-only to the same DB-level clearance as `hr`, with two content-based redaction categories layered on top instead — see `mcp_server/redaction.py` for the category definitions:
 
 | Identity | Secret env var | Clearance | Extra redaction | Employee tools? | Asset write? | Database |
 |---|---|---|---|---|---|---|
 | `full` | `MCP_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) | create + update, any slug | live |
+| `ayan` | `MCP_AYAN_URL_SECRET` | `FULL_CLEARANCE` | none | Yes (read + write) | create + update, any slug | live |
 | `hr` | `MCP_HR_URL_SECRET` | `HR_CLEARANCE` | `non_payroll_monetary_amounts` — every dollar figure stripped *except* payroll/salary/incentive | Yes (read + write) | update only, `eoxs-salary-details` only | live |
 | `general` | `MCP_GENERAL_URL_SECRET` | `HR_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) + `employee_activity_monitoring` (Cattr/performance content) | No | No | live |
 | `intern` | `MCP_INTERN_URL_SECRET` | `GENERAL_CLEARANCE` | `monetary_amounts` (every dollar figure, no exceptions) | No | No | live |
 | `staging_qa` | `MCP_STAGING_URL_SECRET` | `FULL_CLEARANCE` | none | Yes, unrestricted | Yes, unrestricted | **staging** |
+
+**`ayan`** (added 2026-08-24, landed in commit `f6e01e9` folded into an unrelated container-platform-deployability commit — worth knowing if you're `git blame`-ing this) is a second full-clearance, write-capable identity, functionally identical to `full` in every permission respect. It exists so Ayan's own writes are tagged `changed_by='ayan'` in `employee_change_log`/`asset_change_log` rather than `changed_by='full'`, for clean attribution — not because he needs different access than Raj. **This identity caused a real production outage on 2026-08-25**: `MCP_AYAN_URL_SECRET` is a hard-required `os.environ[...]` lookup (not `.get()` with a default), but was never added to this droplet's `.env` when the identity was added. `eoxs-mcp.service` had been running since before this code landed, so the gap was silently masked for a day until the service was restarted for an unrelated reason, at which point it crash-looped on `KeyError: 'MCP_AYAN_URL_SECRET'` until the secret was added. **Lesson**: adding a new hard-required env var to a long-lived service's code is a latent outage until that service's next restart — grep `os.environ["..."]` (not `.get`) across a module before assuming a code change is safe to leave undeployed.
 
 ### 5.1 Employee directory tools (2026-08-12) — the first write path
 
@@ -153,7 +156,7 @@ One more `Server` instance (`server.py`'s module-level `server = build_server(FU
 **Tool count: 20** tiered/read-only tools, present for every identity:
 `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`.
 (`list_assets`/`search_assets`/`get_asset` added 2026-08-12 alongside the new `assets` table — see `docs/raw-ingestion.md` §2 Assets. `get_asset` returns the full raw document; the corresponding wiki page under `wiki/sources/assets/` is a synthesized summary, not a substitute for the original text.)
-Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`hr` — **29 tools total** for `full` (20 + 7 + 2), **28** for `hr` (20 + 7 + 1, no `create_asset`), still **20** for `general`/`intern`. `staging_qa` (§5.3) also sees **29** (unrestricted, like `full`) but every one of them targets `eoxs_wiki_staging`, not live.
+Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`ayan`/`hr` — **29 tools total** for `full` (20 + 7 + 2), **29** for `ayan` (identical tool set to `full`, distinguished only by its `changed_by` attribution, see §5's identity table), **28** for `hr` (20 + 7 + 1, no `create_asset`), still **20** for `general`/`intern`. `staging_qa` (§5.3) also sees **29** (unrestricted, like `full`) but every one of them targets `eoxs_wiki_staging`, not live.
 
 `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
 
@@ -197,9 +200,9 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 **Ingestion server / webhooks:** `INGESTION_SERVER_PORT`, `INGESTION_WEBHOOK_SECRET`, `FIREFLIES_WEBHOOK_SECRET`, `FATHOM_WEBHOOK_SECRET`
 
-**Postgres:** `PGHOST`, `PGPORT`, `PGDATABASE`, `PGDATABASE_STAGING`, `PGUSER`, `PGPASSWORD`
+**Postgres:** `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`. `PGDATABASE_STAGING` is **not actually set** in this droplet's `.env` (confirmed 2026-08-25) despite appearing in earlier versions of this list — `mcp_server/db.py`'s `get_staging_conn()` reads it via `os.environ.get("PGDATABASE_STAGING", "eoxs_wiki_staging")`, so the hardcoded fallback silently does the real work. No bug results (the physical `eoxs_wiki_staging` database is reached correctly either way), but don't go looking for this variable in `.env` — it isn't there, and doesn't need to be.
 
-**MCP server:** `MCP_URL_SECRET`, `MCP_HR_URL_SECRET`, `MCP_GENERAL_URL_SECRET`, `MCP_INTERN_URL_SECRET`, `MCP_HTTP_PORT`
+**MCP server:** `MCP_URL_SECRET`, `MCP_AYAN_URL_SECRET` (added 2026-08-24 — see §5's `ayan` identity note; this one is easy to miss since it landed inside an unrelated commit), `MCP_HR_URL_SECRET`, `MCP_GENERAL_URL_SECRET`, `MCP_INTERN_URL_SECRET`, `MCP_STAGING_URL_SECRET`, `MCP_HTTP_PORT`
 
 **Anthropic:** `ANTHROPIC_API_KEY` (spam/relevance filters), `CLASSIFIER_ANTHROPIC_API_KEY` (tier classification — deliberately separate for independent cost tracking)
 
