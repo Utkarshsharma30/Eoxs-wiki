@@ -25,6 +25,13 @@ from memory or from this document — this document deliberately contains none.
 If you can see a tool that is not listed here, it belongs to another connector
 and none of these rules apply to it.
 
+**A second full-clearance connection exists (`ayan`), identical to this one
+in every rule and tool in this file** — it exists only so Ayan's own writes
+are attributed separately (`changed_by='ayan'` in the audit trail) from
+Raj's (`changed_by='full'`). If you're connected as `ayan` rather than
+`full`, every instruction below still applies exactly as written; there is
+no behavioral difference to reason about.
+
 ---
 
 ## 1. Which connector to reach for

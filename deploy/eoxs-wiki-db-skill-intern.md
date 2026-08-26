@@ -6,7 +6,7 @@ description: Navigation and access-scope guide for the intern-access EOXS data c
 # EOXS Data — Session Skill (Intern Access)
 
 You have one EOXS data connector: the curated second brain — emails, calls,
-implementation tasks, synthesized wiki. 17 purpose-built, **read-only** tools.
+implementation tasks, synthesized wiki. 20 purpose-built, **read-only** tools.
 
 All EOXS data here is confidential — business correspondence, financials,
 personnel and client records. Treat every name, number, and quote as sensitive.
@@ -70,7 +70,7 @@ which tier the surrounding content belongs to.
 
 ## 2. What this connector does not have
 
-This connection has no other tools beyond the 21 listed in §4 — no raw SQL
+This connection has no other tools beyond the 20 listed in §4 — no raw SQL
 console against any Odoo database, and **no write capability of any kind**.
 There is nothing here that creates, updates, or modifies a task, record, or
 any other data, on this connector or any other system. Do not describe,
