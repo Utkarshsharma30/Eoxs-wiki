@@ -101,10 +101,17 @@ TOOL_DEFS = [
         Tool(
             name="add_staging_citation",
             description="Cite a raw source row on a staging page you created/updated this call. "
-                        "source_type: 'email_thread'|'ticket'|'call_transcript'|'implementation_task'. "
+                        "source_type: 'email_thread'|'ticket'|'call_transcript'|'implementation_task'|"
+                        "'asset'|'repo_doc'. "
                         "For 'implementation_task', source_id MUST be odoo_task_id, never the internal `id` "
                         "field (get_implementation_task's response includes both -- `id` is unstable across "
-                        "raw-ingestion refreshes and a citation using it can go stale within hours).",
+                        "raw-ingestion refreshes and a citation using it can go stale within hours). "
+                        "For 'repo_doc', source_id is repo_docs.id (from a repo_docs-category candidate row, "
+                        "or from list_repo_docs/search_repo_docs/get_repo_doc) -- ALWAYS use this source_type "
+                        "for repo_docs rows, never 'asset' or another lookalike, since access-tier is computed "
+                        "from source_type at promotion time and 'repo_doc' is what maps a citation to its "
+                        "hardcoded tier1 row (see promote.py) -- an unrecognized source_type silently "
+                        "contributes no tier at all, which can under-restrict the whole page.",
             inputSchema={"type": "object", "properties": {
                 "staging_page_id": {"type": "integer"}, "source_type": {"type": "string"},
                 "source_id": {"type": "integer"}, "source_ref_raw": {"type": "string"},

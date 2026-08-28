@@ -34,7 +34,7 @@ ingestion/
   retry.py                          38  shared retry helper
   _check_env.py                     40  env-var-presence diagnostic (has some stale names — see §12)
 ```
-4,064+ lines total, 27 files (line count not recomputed since oauth_gmail.py/oauth_zoho.py/import_assets.py were added — see git for exact current counts).
+5,799 lines total, 33 files (recomputed 2026-08-28). The list above is not exhaustive as of this count — `backfill_attachments.py`, `attachment_extract.py`, `backfill_call_dates.py`, `tz.py`, and `import_repo_docs.py` (§ below) have been added since it was last written; see `git log --stat -- ingestion/` for the exact current file set.
 
 ## 2. Each fetcher, in detail
 
@@ -75,10 +75,11 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
   domain, since Google rejects a raw IP literal as a Web-application client's redirect_uri ("must end
   with a public top-level domain"); see the `deploy/nginx-https.conf` server block for this hostname,
   with its own standard 90-day Let's Encrypt cert (separate from the ~6-day IP-address cert the bare-IP
-  block uses). Swap this for a real subdomain once one exists (`docs/infrastructure-roadmap.md`).
-  Current accounts: `raj_gmail`, `ron_gmail`
-  (both `raw_sweep_enabled=true`), `remya_gmail` (`raw_sweep_enabled=false` — 2026-08-10, one-time
-  historical pull only, not an ongoing source).
+  block uses). Swap this for a real subdomain once one exists (`docs/migration-status.md` §4).
+  Current accounts (as of 2026-08-25): `raj_gmail`, `ron_gmail` (both `raw_sweep_enabled=true`),
+  `remya_gmail` (`raw_sweep_enabled=false` — 2026-08-10, one-time historical pull only, not an
+  ongoing source), and `isha_gmail` (self-serve connected 2026-08-12, `raw_sweep_enabled=false` —
+  connected but not yet enabled for the recurring sweep).
 - **Entry point**: `process_account(account, *, dry_run, limit, safety_overlap_days, classify)`.
 - **Incremental fetch**: `sync_since(account, safety_overlap_days)` → Gmail search query `after:YYYY/MM/DD`. Cursor advances via `set_last_synced_at()` on success.
 - **Pagination**: pages of up to 100, following `nextPageToken` until exhausted or `limit` hit.
@@ -99,8 +100,11 @@ Every fetcher shares the same overall shape: connect → figure out what's new s
   `external_account_id` via `GET /api/accounts` (no library equivalent to
   `google-auth-oauthlib`, so this is hand-rolled with `httpx` — deliberately **no PKCE**, since
   nothing here auto-enables it the way that library did for Gmail, which is what caused the
-  "Missing code verifier" bug during the Gmail rollout). Current accounts: `support_zoho`
-  (`client_type='legacy'`).
+  "Missing code verifier" bug during the Gmail rollout). Current accounts (as of 2026-08-25):
+  `support_zoho` (`client_type='legacy'`, `raw_sweep_enabled=true`), `isha_zoho` (`client_type='web'`,
+  self-serve connected, `raw_sweep_enabled=true`, actively syncing every 2 hours with zero errors),
+  and `ayan_zoho` (`client_type='web'`, self-serve connected 2026-08-12, `raw_sweep_enabled=false` —
+  connected but not enabled for the recurring sweep).
 - **Entry point**: `process_zoho(account, *, dry_run, limit, safety_overlap_days, classify)`.
 - **Incremental fetch**: cursor converted to epoch-ms and applied **client-side** — Zoho's server-side date filters were found unreliable.
 - **Pagination**: offset paging, `PAGE_SIZE=200`.
@@ -258,11 +262,13 @@ Straight from `ingestion/server.py`'s own docstring: *"Zoho and Odoo have no web
 | Zoho | **No** | 2-hour sweep only |
 | EOXS Support Tickets | **No** | 2-hour sweep only |
 | Sales Orders & Invoices | **No** | 2-hour sweep only |
-| Client implementation boards (all 6) | **No** | 2-hour sweep only |
+| Client implementation boards (all 6) | **No** | **None — removed 2026-08-10, by explicit instruction** (see below) |
 
-A global `asyncio.Lock` prevents overlapping runs (webhook or sweep) — a trigger that arrives while another is in-flight is simply dropped with a log line, not queued. Every trigger, webhook or sweep, is recorded in `ingest_log`; only full-sweep runs (`/trigger/manual` or the cron `--sweep` path) additionally report to Linear, deliberately, so a single incoming email doesn't flood the Linear board with an issue per message.
+**Correction (2026-08-25 health audit)**: unlike every other row in this table, client implementation boards do **not** actually have a 2-hour-sweep fallback anymore. `ingestion/server.py`'s `run_full_sweep()` source list permanently dropped the per-client Odoo fetch on 2026-08-10 (commit `17f28e8`) — it's explicitly a one-time historical pull now, not an ongoing source. `sync_cursors` confirms every one of the 6 `odoo_*` cursors has been frozen at 2026-08-10 for 15+ days with zero automatic recovery path; the only way to refresh `implementation_tasks` is a manual `python -m ingestion.odoo_fetcher` run. If this table is ever restored to "2-hour sweep" for this row, that would be a deliberate reversal of the 2026-08-10 decision, not a doc fix.
 
-The actual production 2-hourly sweep runs via `python -m ingestion.server --sweep` (triggered by `deploy/eoxs-sweep.timer`), not the HTTP `/trigger/manual` route — see `docs/backend-server.md` for the exact timer schedule.
+A global `asyncio.Lock` is intended to prevent overlapping runs (webhook or sweep) within the FastAPI process's own `_run_bg()` wrapper — a trigger arriving while another is in-flight there is dropped with a log line, not queued. **This lock does not cover every path that can invoke `run_full_sweep()`** — the same 2026-08-25 audit found a second, unidentified caller producing a duplicate, mostly-failing "Raw ingestion sweep" roughly 30-40 seconds before the real 2-hourly one, on essentially every 2-hour cycle for at least 2 weeks (confirmed via paired Linear issues; ruled out `/trigger/manual` and the 3 webhook routes via their own service's journal showing zero hits in the affected windows). `run_full_sweep()` itself has no cross-process lock (e.g. a Postgres advisory lock or pidfile) — only the async wrapper does, and whatever this second caller is, it isn't going through that wrapper. No data corruption has been observed (per-message dedup absorbs the redundant run), but this means real concurrent-write exposure and doubled API-quota usage against Gmail/Zoho/Fireflies/Fathom exist right now, from a source not yet identified — checking nginx access logs and the root crontab (both require access this audit didn't have) is the next step. Every trigger, webhook or sweep, is recorded in `ingest_log`; only full-sweep runs (`/trigger/manual` or the cron `--sweep` path) additionally report to Linear, deliberately, so a single incoming email doesn't flood the Linear board with an issue per message.
+
+The actual production 2-hourly sweep runs via `python -m ingestion.server --sweep` (triggered by `deploy/eoxs-sweep.timer`), not the HTTP `/trigger/manual` route — see `docs/backend-server.md` for the exact timer schedule. This distinction matters in practice: `--sweep` execs a brand-new Python process from disk every time, so it always runs current code, while `eoxs-ingestion.service` (which serves `/trigger/manual` and the 3 webhooks) is long-lived and only picks up code changes on its own restart. A 2026-08-25 audit found this service had been running 13-day-old code including a pre-fix version of `ingestion/zoho_fetcher.py`'s pagination handling (fixed in commit `4d4bac7`, 2026-08-21) — meaning a Zoho sweep triggered via `/trigger/manual` specifically (not the real 2-hourly timer) would still hit the bug that fix addressed. Restarting `eoxs-ingestion.service` resolves this; there's no code-level guard against this class of drift, so it's worth checking after any commit that touches a module this service imports.
 
 ## 9. Client matching (`client_id`) — two different strategies
 

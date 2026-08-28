@@ -3,7 +3,7 @@
 Everything in this file was hand-applied directly on the Hetzner box (`5.223.44.95`),
 not via a commit or a setup script — `deploy/setup.sh` predates all of it. Captured
 here 2026-08-20 specifically so a DigitalOcean migration doesn't silently drop it;
-see the migration security checklist in `docs/infrastructure-roadmap.md`.
+see `docs/do-migration-security-checklist.md`.
 
 **Status on the DigitalOcean box (verified 2026-08-21):** the security posture below
 was reproduced successfully — ufw 22/80/443 default-deny, SSH key-only with root and

@@ -1,17 +1,18 @@
 # DigitalOcean Migration Security Checklist
 
-*For Talal — organized by the phases in `docs/infrastructure-roadmap.md`, cross-checked
-against the box's actual live state on 2026-08-20. This is a working checklist, not a
-standalone spec — read `docs/infrastructure-roadmap.md` first for the full reasoning behind
-the phased plan; this document only adds the security lens on top of it.*
+*For Talal — organized by the migration's phased plan (originally `docs/infrastructure-roadmap.md`,
+deleted 2026-08-26 as superseded; the live plan and status now live in `docs/migration-status.md`),
+cross-checked against the box's actual live state on 2026-08-20. This is a working checklist,
+not a standalone spec — read `docs/migration-status.md` first for the current reasoning and
+status; this document only adds the security lens on top of it.*
 
-## Two things that changed since the roadmap doc was written
+## Two things that changed since the original roadmap was written
 
-**Resolved, not carried forward**: the roadmap doc flags the raw-ingestion sweep writing
-stray rows to `tickets` as an open, unresolved bug. It isn't — confirmed live by grepping
-`ingestion/server.py`: commit `3fa4c16` removed `tickets_fetcher.py`'s registration from the
-sweep on 2026-08-12. Nothing to fix during this migration window. (`docs/infrastructure-roadmap.md`
-and `docs/raw-ingestion.md` §12 have both been corrected to match.)
+**Resolved, not carried forward**: the original roadmap doc flagged the raw-ingestion sweep
+writing stray rows to `tickets` as an open, unresolved bug. It isn't — confirmed live by
+grepping `ingestion/server.py`: commit `3fa4c16` removed `tickets_fetcher.py`'s registration
+from the sweep on 2026-08-12. Nothing to fix during this migration window. (`docs/raw-ingestion.md`
+§12 was corrected to match.)
 
 **A real gap, now closed**: none of Talal's 2026-08-15 security hardening on the live Hetzner
 box was ever committed to this repo until 2026-08-20 — `server_tokens off`, TLS locked to

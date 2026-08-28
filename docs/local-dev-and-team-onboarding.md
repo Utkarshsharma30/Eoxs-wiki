@@ -2,8 +2,9 @@
 
 *How to develop against this project on a laptop instead of editing directly
 on the production server, and how to repeat that setup for other teammates
-later. Supersedes the one-off shape of `docs/handoff-access-tier-dev.md`
-(which predates this repo existing on GitHub) with a general, repeatable
+later. Supersedes the one-off shape of the original chunk-level-access-tier
+feature handoff (a file that predated this repo existing on GitHub; deleted
+2026-08-26 as fully superseded by this doc) with a general, repeatable
 process.*
 
 ## The model

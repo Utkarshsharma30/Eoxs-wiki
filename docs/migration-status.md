@@ -3,8 +3,12 @@
 *Live status of the Hetzner → DigitalOcean migration and the re-architecture that
 follows it. Written 2026-08-21. If you are picking this up cold, read this file first —
 it is the "what's on the plate right now" document. The deep references are
-`docs/backend-server.md` (Hetzner), `docs/backend-server-digitalocean.md` (the new box),
-and `docs/infrastructure-roadmap.md` (the target architecture and why).*
+`docs/backend-server.md` (Hetzner) and `docs/backend-server-digitalocean.md` (the new box).
+`docs/infrastructure-roadmap.md` (the original target-architecture reasoning: why a
+DigitalOcean hybrid — Droplet + App Platform + Managed Database — not a pure PaaS move, and
+the platform comparison behind picking DigitalOcean) was deleted 2026-08-26 as superseded —
+this file is now the sole live status/plan; §4 below carries the remaining execution steps
+forward.*
 
 ---
 

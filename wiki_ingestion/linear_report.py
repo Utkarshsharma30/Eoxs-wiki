@@ -147,9 +147,11 @@ def _row_label_generic(row, source_kind):
     if source_kind == "tickets":
         return f"ticket id={row['id']} {row.get('ticket_number', '')}: {row.get('subject', '')}"
     if source_kind.startswith("client_"):
-        return f"implementation task odoo_task_id={row['odoo_task_id']}: {row.get('task_name', '')}"
+        return f"implementation task odoo_task_id={row['odoo_task_id']}: {row.get('task_name', '')} (stage: {row.get('stage', '')})"
     if source_kind == "calls":
         return f"call id={row['id']} ({row.get('source', '')}): {row.get('meeting_title', '')}"
+    if source_kind == "assets":
+        return f"asset id={row['id']} slug={row.get('slug', '')}: {row.get('title', '')}"
     return f"email thread id={row['id']}: {row.get('subject', '')}"
 
 

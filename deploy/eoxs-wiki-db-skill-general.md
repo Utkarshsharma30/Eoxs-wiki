@@ -10,7 +10,7 @@ systems with different shapes.
 
 | Connector | What it is | Shape |
 |---|---|---|
-| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki | 17 purpose-built tools |
+| **eoxs-db** | The curated second brain — emails, calls, implementation tasks, synthesized wiki | 20 purpose-built tools |
 | **eoxs-teams** | EOXS Team Live Odoo, read-only — **the only source for support tickets, invoices/sales orders, and CRM/pipeline/prospect data** | Raw SQL console (4 tools) |
 
 All EOXS data here is confidential — business correspondence, financials,

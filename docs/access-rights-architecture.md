@@ -94,10 +94,12 @@ clearance as `hr`, because most `tier2_confidential` pages carry one
 dollar figure alongside otherwise-relevant general content — losing the
 whole page over one number was worse than stripping just the number.
 
-Tool counts: **20 read-only tools** for every identity; `full`/`hr` also
-get 7 employee tools + 1–2 asset-write tools (**29 for `full`, 28 for
-`hr`**, since `hr` has no `create_asset`); `general`/`intern` stay at 20;
-`staging_qa` sees all 29, every one hitting staging.
+Tool counts: **23 read-only tools** for every identity (added
+`list_repo_docs`/`search_repo_docs`/`get_repo_doc` 2026-08-26, tier1-only —
+see `docs/backend-server.md` §5.5); `full`/`hr` also
+get 7 employee tools + 1–2 asset-write tools (**32 for `full`, 31 for
+`hr`**, since `hr` has no `create_asset`); `general`/`intern` stay at 23;
+`staging_qa` sees all 32, every one hitting staging.
 
 ## 1.4 How identity is enforced — URL secret, not login
 
@@ -133,12 +135,13 @@ parameter, and every tiered tool function takes `clearance=FULL_CLEARANCE`
 as a keyword default, overridden per-identity via the `functools.partial`
 binding in §1.4.
 
-17 of the 20 read tools are tier-filtered (`TIER_FILTERED_TOOLS` in
+20 of the 23 read tools are tier-filtered (`TIER_FILTERED_TOOLS` in
 `server.py`): `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`,
 `search_emails`, `get_email`, `get_attachment_text`, `list_calls`,
 `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`,
 `get_client_profile`, `get_client_file`, `list_implementation_tasks`,
-`search_implementation_tasks`, `get_implementation_task`. The 3
+`search_implementation_tasks`, `get_implementation_task`,
+`list_repo_docs`, `search_repo_docs`, `get_repo_doc`. The 3
 exceptions — `list_clients`, `list_contacts` — have no `access_tier`
 column on their underlying rows, so nothing to filter. A tool reaching a
 child row only through a parent that already carries `access_tier` (e.g.
