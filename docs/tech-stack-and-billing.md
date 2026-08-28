@@ -79,13 +79,48 @@ live 2026-08-28) or otherwise load-bearing for either repo. Grouped by function.
 
 ### Infrastructure
 
-| Service | Used for | Env var(s) | Plan | Billing cycle | Amount |
-|---|---|---|---|---|---|
-| **VPS host** | The one physical machine everything runs on. See `docs/backend-server.md` for the live Hetzner-origin box's full spec, `docs/backend-server-digitalocean.md` for the parallel DigitalOcean-migration track, and `docs/migration-status.md` for which is authoritative right now — deliberately not restated here to avoid two places drifting out of sync. | n/a (host-level, not a credential) | [FILL IN] | [FILL IN] | [FILL IN] |
-| **DigitalOcean Managed Postgres** (`eoxs-db-live-cluster`, SGP1) | Planned re-architecture target (cluster already exists per `docs/migration-status.md` §4) — not yet the live database (that's still self-hosted Postgres 16 on the VPS, `docs/postgres-database.md`). | n/a | [FILL IN — cluster size/tier] | [FILL IN] | [FILL IN] |
-| **DigitalOcean App Platform** | Planned re-architecture target for the stateless services (MCP connectors, webhook receiver, sweep) — `.do/app.yaml`, not yet live. | n/a | [FILL IN] | [FILL IN] | [FILL IN] |
-| **GoDaddy** | DNS registrar for `askcruz.com` (the frontend's domain — apex is a live Vercel site, **do not touch**) and the planned `mcp.askcruz.com` subdomain for this backend (`docs/migration-status.md` §4 item 2). DNS is *not* hosted on DigitalOcean. | n/a | [FILL IN — domain registration, likely annual] | Annual (typical for domain registration) | [FILL IN] |
-| **Let's Encrypt** (via `certbot`) | TLS certificates — free, automated. Short-lived (~7-day) IP-address cert on the live Hetzner box, normal 90-day cert on the DigitalOcean box. Auto-renews via `certbot.timer`. | n/a | Free | n/a | $0 |
+**DigitalOcean — real figures, pulled from the billing API on 2026-08-28.** Month-to-date
+**$43.97** (invoice preview $42.21 after a $5.00 Inference Cloud Trial credit; +13% HST
+Ontario). Everything is in SGP1. Refresh with `doctl balance get`, then
+`doctl invoice list` and `doctl invoice get <uuid>`.
+
+| Resource | Type | Spec | MTD | Notes |
+|---|---|---|---|---|
+| `eoxs-staging-app` | Droplet | 2 vCPU / 4 GB / 80 GB | $11.61 | staging |
+| `eoxs-staging-agent` | Droplet | 2 vCPU / 4 GB / 80 GB | $11.61 | staging |
+| `Live-droplet` | Droplet | 2 vCPU / 4 GB / 80 GB | $6.47 | **production** |
+| `staging-cruz` | Managed PG 16 | 1 GB / 1 vCPU / 10 GB | $7.33 | staging DB |
+| `eoxs-db-live-cluster` | Managed PG 16 | 1 GB / 1 vCPU / 10 GB | $1.91 | **production DB — partial month, see below** |
+| `cruz-3gm-outlook-db` | Managed PG 16 | 1 GB / 1 vCPU / 10 GB | $0.68 | 3GM client |
+| `eoxs-services-sgp1` | App Platform | 3 components | $2.28 | eoxs-mcp + eoxs-ingestion + eoxs-sweep job |
+| `askcruz-3gm` | Droplet | 1 vCPU / 512 MB / 10 GB | $0.18 | 3GM client |
+| 2x droplet snapshots | Snapshot | 4.02 + 4.41 GiB | $0.25 | dated 14 Aug |
+| Taxes (HST 13%) | — | — | $4.86 | |
+| Inference Cloud Trial credit | — | — | -$5.00 | one-off |
+
+**Three things the numbers make obvious:**
+
+- **Staging is ~70% of the DigitalOcean bill.** The two staging droplets ($23.22) plus
+  `staging-cruz` ($7.33) come to **$30.55**, against $8.38 for the production droplet plus
+  its database. Both staging droplets are 2 vCPU / 4 GB — the same size as production.
+- **`eoxs-db-live-cluster`'s $1.91 is not representative.** It was created 2026-08-25, so it
+  has only ~85 hours of runtime this cycle. At a full month expect roughly **$16-17**.
+- **Two snapshots from 14 Aug are still billing** ($0.25/mo). Small, but worth deleting if
+  the staging boxes have moved on.
+
+**Correction to an earlier version of this section:** the Managed Postgres cluster and App
+Platform app are described elsewhere in this repo as "planned, not yet live." Both are
+**live and in production** as of 2026-08-25 — the droplet reads the managed cluster, and
+App Platform owns the 2-hourly sweep. See `docs/migration-status.md`.
+
+**Not on DigitalOcean, billed separately:**
+
+| Service | Used for | Plan | Billing cycle | Amount |
+|---|---|---|---|---|
+| **Hetzner** (`5.223.44.95`) | The original box — **still live, still serving users** until cut-over. Not in the $43.97 above. | [FILL IN] | [FILL IN] | [FILL IN — historically ~$6-10/mo] |
+| **GoDaddy** | DNS registrar for `askcruz.com` (apex is a live Vercel site, **do not touch**) and the `mcp.askcruz.com` subdomain serving this backend. DNS is *not* hosted on DigitalOcean. | [FILL IN] | Annual (typical) | [FILL IN] |
+| **Vercel** | `askcruz.com` frontend hosting — Jaskeerat's app, separate codebase. | [FILL IN] | [FILL IN] | [FILL IN] |
+| **Let's Encrypt** (via `certbot`) | TLS certificates. 90-day cert covering `mcp.askcruz.com` and the nip.io host, auto-renewing via `certbot.timer`. | Free | n/a | $0 |
 
 ### Not billed separately (bundled into the above or genuinely free)
 
@@ -106,7 +141,9 @@ becomes a one-line answer rather than a re-derivation every time someone asks.*
 | Raw data sources (Gmail/Workspace, Zoho, Fireflies, Fathom) | [FILL IN] | |
 | Odoo (client tenants) | [FILL IN — likely $0 if client-owned] | |
 | Reporting (Linear) | [FILL IN] | |
-| Infrastructure (VPS + planned DO managed services + domain, amortized) | [FILL IN] | Domain renewal is annual — divide by 12 for this rollup |
+| Infrastructure — DigitalOcean | **$43.97** (Aug MTD) | Real figure. Expect ~$58-60 from September once `eoxs-db-live-cluster` bills a full month, unless staging is resized |
+| Infrastructure — Hetzner (until cut-over) | [FILL IN] | Doubled infrastructure while both boxes run |
+| Infrastructure — domain + frontend hosting | [FILL IN] | GoDaddy annual (divide by 12) + Vercel |
 | **Total** | **[FILL IN]** | |
 
 ---
