@@ -26,7 +26,11 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
    most of it is a placeholder today, see the file) plan tier/billing cycle/cost. A
    different kind of doc from everything above — those describe how the system works,
    this tracks what it costs. Update by hand; nothing auto-syncs vendor billing.
-9. **`docs/training/`** — intern/new-hire orientation video scripts.
+9. **`docs/digitalocean-billing.md`** (added 2026-08-28) — every DigitalOcean resource and
+   what it costs, pulled live from the billing API with the refresh commands recorded.
+   Separate from the file above because DigitalOcean is the one vendor whose numbers can be
+   read programmatically, so it stays exact while the cross-vendor doc holds placeholders.
+10. **`docs/training/`** — intern/new-hire orientation video scripts.
 
 `docs/infrastructure-roadmap.md` and `docs/handoff-access-tier-dev.md` were deleted
 2026-08-26 (superseded content — the roadmap's live status lives in
