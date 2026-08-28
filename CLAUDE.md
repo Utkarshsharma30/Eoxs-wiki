@@ -21,7 +21,12 @@ anything. `HANDOFF.md` is superseded historical context — start here instead.
 6. **`docs/linear-integration.md`** — status reporting to Linear.
 7. **`docs/local-dev-and-team-onboarding.md`** — local dev setup, team delegation model,
    and a troubleshooting section built from real mistakes made setting this up.
-8. **`docs/training/`** — intern/new-hire orientation video scripts.
+8. **`docs/tech-stack-and-billing.md`** (added 2026-08-28) — the operational/financial
+   inventory: every external vendor dependency, why it's used, and (once filled in —
+   most of it is a placeholder today, see the file) plan tier/billing cycle/cost. A
+   different kind of doc from everything above — those describe how the system works,
+   this tracks what it costs. Update by hand; nothing auto-syncs vendor billing.
+9. **`docs/training/`** — intern/new-hire orientation video scripts.
 
 `docs/infrastructure-roadmap.md` and `docs/handoff-access-tier-dev.md` were deleted
 2026-08-26 (superseded content — the roadmap's live status lives in
