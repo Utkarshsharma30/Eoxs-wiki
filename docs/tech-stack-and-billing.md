@@ -55,10 +55,13 @@ live 2026-08-28) or otherwise load-bearing for either repo. Grouped by function.
 
 ### AI / LLM
 
-| Service | Used for | Env var(s) | Plan | Billing cycle | Amount |
-|---|---|---|---|---|---|
-| **Anthropic API** | Two separate keys, deliberately: `ANTHROPIC_API_KEY` (spam/relevance filtering, call-noise filtering — `spam_filter.py`, `call_relevance.py`) and `CLASSIFIER_ANTHROPIC_API_KEY` (access-tier classification — `inline_tier_classifier.py`, `tier_classifier.py`), kept separate for independent cost tracking per the code's own convention. Also the underlying model for every `claude -p` wiki-ingestion sub-agent call (`wiki_ingestion/headless_agent.py`) and the MCP redaction safety net (`mcp_server/redaction.py`, Sonnet). | `ANTHROPIC_API_KEY`, `CLASSIFIER_ANTHROPIC_API_KEY` | [FILL IN — usage-based API, not a flat plan] | [FILL IN — likely monthly invoice] | [FILL IN — variable, scales with ingestion + wiki-cycle volume] |
-| **Claude CLI** (`claude`, `/usr/bin/claude`) | Runs the actual `claude -p` sub-agent processes the wiki pipeline spawns (Phase 3/4/5). Authenticated via an interactive `deploy`-user login (`~/.claude`), separate from the API keys above — see `docs/backend-server.md` §7 for the distinction. | none (interactive login, not an env var) | [FILL IN — which plan/seat this login is tied to] | [FILL IN] | [FILL IN] |
+**Three genuinely separate cost channels, easy to conflate — do not read this as "one Anthropic bill split three ways for accounting purposes only." The `claude` CLI login is billed completely separately from either API key, and is structurally the most expensive of the three (real multi-turn agentic work, not one-shot classification calls).**
+
+| Service | Model | Used for | Env var(s) / auth | Plan | Billing cycle | Amount |
+|---|---|---|---|---|---|---|
+| **Anthropic API — `ANTHROPIC_API_KEY`** | Haiku (`claude-haiku-4-5`), `max_tokens=5` | **Only** two call sites: `spam_filter.py` (is this Gmail/Zoho email marketing/spam/cold-outreach? one KEEP/DISCARD word) and `call_relevance.py` (is this call recording empty/trivial noise?). One tiny call per email/call, cheapest of the three by a wide margin — Haiku pricing, ~5-token outputs. | `ANTHROPIC_API_KEY` | [FILL IN — usage-based API, not a flat plan] | [FILL IN — likely monthly invoice] | [FILL IN — should be the smallest of the three line items; if it isn't, something's wrong] |
+| **Anthropic API — `CLASSIFIER_ANTHROPIC_API_KEY`** | Mostly Haiku, but **`mcp_server/redaction.py` uses Sonnet** (`claude-sonnet-5`, `max_tokens=8000`) | Broader than the name suggests: access-tier classification on every new row (`inline_tier_classifier.py`, both `tier_classifier.py` files — Haiku), LLM-assisted citation repair (`citation_llm_resolver.py`), **and the MCP redaction safety net** (`mcp_server/redaction.py`) — this last one runs on *every tool call* for every non-`full`/`ayan` identity (hr/general/intern/staging_qa), inspecting the full response text, Sonnet-priced. Kept as a separate key from `ANTHROPIC_API_KEY` for independent cost tracking, per the code's own convention — but note it's a mixed bag internally, not a single cheap function. | `CLASSIFIER_ANTHROPIC_API_KEY` | [FILL IN] | [FILL IN] | [FILL IN — likely noticeably higher than the row above once redaction volume is counted] |
+| **Claude CLI** (`claude`, `/usr/bin/claude`) — **separate billing from both keys above** | Sonnet (CLI default — no `--model` flag is passed, see `wiki_ingestion/headless_agent.py`) | Runs every wiki-ingestion sub-agent: one full `claude -p` agentic session per ~25-row chunk, for Phase 3 (drafting), Phase 4 (consolidation), and Phase 5 (review) — each a real multi-turn session reading full raw content via MCP tools and writing/citing wiki pages, not a one-word classification. This is very likely the dominant cost of the three rows on this table. Authenticated via an interactive `deploy`-user login (`~/.claude`) — see `docs/backend-server.md` §7. | none (interactive login, not an env var — won't show up in an `.env` scan) | [FILL IN — which plan/seat this login is tied to: Pro/Max/Team/API-metered] | [FILL IN] | [FILL IN — check this FIRST when investigating total AI spend] |
 
 ### Raw data sources (ingested every 2 hours + real-time webhooks where available)
 
@@ -102,7 +105,9 @@ becomes a one-line answer rather than a re-derivation every time someone asks.*
 
 | Category | Monthly (or monthly-equivalent) | Notes |
 |---|---|---|
-| AI / LLM (Anthropic API + Claude CLI seat) | [FILL IN] | Usage-based — expect this to be the most variable line item, scaling with ingestion volume and wiki-cycle frequency |
+| `ANTHROPIC_API_KEY` (Haiku, spam/call-noise filtering only) | [FILL IN] | Should be the smallest AI line item — cheap model, tiny outputs, two narrow call sites |
+| `CLASSIFIER_ANTHROPIC_API_KEY` (mostly Haiku, but redaction is Sonnet) | [FILL IN] | Mixed cost — the tier-classification calls are cheap, the redaction calls (Sonnet, every non-`full` tool call) are not |
+| Claude CLI login (Sonnet, wiki-ingestion sub-agents) | [FILL IN] | **Check here first** — likely the dominant AI cost by far; real multi-turn agentic sessions, not classification calls, three phases per cycle, several cycles/day |
 | Raw data sources (Gmail/Workspace, Zoho, Fireflies, Fathom) | [FILL IN] | |
 | Odoo (client tenants) | [FILL IN — likely $0 if client-owned] | |
 | Reporting (Linear) | [FILL IN] | |
@@ -119,10 +124,17 @@ detail already documented elsewhere rather than restating it.
 1. **Postgres (self-hosted, this VPS)** — everything reads/writes here. No
    managed failover, no automated backup yet (`docs/migration-status.md` §4,
    `docs/postgres-database.md` §8). Single point of failure for the entire system.
-2. **Anthropic API** — both ingestion filtering/classification AND the entire
-   wiki-synthesis pipeline (`claude -p` sub-agents) stop working without it. Raw
-   ingestion of *unfiltered* data would likely still partially function (fetchers
-   don't all require a Claude call), but nothing gets classified or synthesized.
+2. **Anthropic API keys** (`ANTHROPIC_API_KEY`, `CLASSIFIER_ANTHROPIC_API_KEY`) —
+   losing these stops spam/call-noise filtering, access-tier classification, and
+   MCP redaction (§3 above). Raw ingestion of *unfiltered, unclassified* data
+   would likely still partially function (fetchers don't all require a Claude
+   call), and every failure mode here fails **closed**, by explicit codebase
+   convention: an unclassifiable row defaults to the most restrictive `tier1`,
+   and a redaction call that errors returns a placeholder rather than the
+   original text (`mcp_server/redaction.py`) — so losing `CLASSIFIER_ANTHROPIC_API_KEY`
+   degrades to over-restrictive/unusable, not to a content-leak. The practical
+   cost of losing these keys is availability (results get blocked/hidden), not
+   an access-control gap.
 3. **The `deploy` user's `claude` CLI login** — separate failure mode from the API
    key above (see `docs/backend-server.md` §7's real incident: the DigitalOcean
    migration shipped with the binary but not the login, and the pipeline ran
