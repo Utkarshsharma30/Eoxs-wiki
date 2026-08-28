@@ -19,7 +19,7 @@ raw source rows you drew from.
 
 ## Candidate rows in this batch ({row_count} total)
 {row_list}
-
+{category_notes}
 ## Rules
 - ALWAYS call search_wiki_inventory before creating a page, to check whether a page on this
   topic already exists (live) or is already being drafted (staging) -- prefer update_staging_page
@@ -40,6 +40,36 @@ When you're done, state in plain text: how many pages you created/updated, and w
 deliberately skipped and why.
 """
 
+CATEGORY_NOTES = {
+    "repo_docs": """
+## Notes for this batch (category: repo_docs)
+These rows are this repository's OWN documentation, not EOXS business content -- this
+repo's `docs/*.md` files, `ARCHITECTURE.md`, or the synthesized codebase-overview
+document. Treat each one as a real, worth-capturing topic by default (this is curated
+engineering reference material someone deliberately wrote, not raw noisy correspondence
+to filter) -- do not skip a row here for being "not noteworthy" the way you might skip a
+routine notification email.
+- Use get_repo_doc(identifier) with the row's `id` or `slug` to read the FULL current text
+  before drafting -- the row summary below is a title only.
+- Write one wiki page per repo doc (1:1 is expected and normal here, unlike email/call
+  batches where many rows can collapse into one page) -- update the existing page via
+  update_staging_page if this doc already has one (search_wiki_inventory first, as always),
+  since these get re-synced on every edit and should refresh in place, not fork into
+  duplicate pages.
+- **You MUST cite every repo_docs row via `add_staging_citation(..., source_type='repo_doc',
+  source_id=<repo_docs.id>, ...)` -- never 'asset' or any other source_type for these.**
+  Every repo_docs row is hardcoded tier1 (Raj-only), and access-tier promotion computes a
+  page's final tier from its citations' source_types (see promote.py) -- citing a repo_doc
+  under the wrong source_type means the page silently promotes to the wrong (less
+  restrictive) tier, exposing internal engineering/infra detail past `full`/`ayan`. If you
+  cite a repo_doc row, `source_type='repo_doc'` is not optional.
+""",
+}
+
+
+def _category_notes(source_kind):
+    return CATEGORY_NOTES.get(source_kind, "")
+
 
 def _row_summary(row, source_kind):
     if source_kind == "tickets":
@@ -54,12 +84,17 @@ def _row_summary(row, source_kind):
         return f"- call id={row['id']} ({row.get('source', '')}): {row.get('meeting_title', '')}"
     if source_kind == "assets":
         return f"- asset id={row['id']} slug={row.get('slug', '')}: {row.get('title', '')}"
+    if source_kind == "repo_docs":
+        return f"- repo doc id={row['id']} slug={row.get('slug', '')}: {row.get('title', '')}"
     return f"- email thread id={row['id']}: {row.get('subject', '')}"  # email accounts
 
 
 def build_prompt(source_kind, rows):
     row_list = "\n".join(_row_summary(r, source_kind) for r in rows)
-    return PROMPT_TEMPLATE.format(source_kind=source_kind, row_count=len(rows), row_list=row_list)
+    return PROMPT_TEMPLATE.format(
+        source_kind=source_kind, row_count=len(rows), row_list=row_list,
+        category_notes=_category_notes(source_kind),
+    )
 
 
 def run_agent(cycle_id, source_kind, rows, timeout_seconds=1200, max_attempts=5, retry_delay_seconds=10):

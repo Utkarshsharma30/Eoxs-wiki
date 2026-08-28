@@ -25,7 +25,7 @@ wiki_ingestion/
   repair_stale_task_citations.py    127  One-off incident repair script
   staging_db.py                      29  Staging-schema DB connection helper
 ```
-3,079 lines total, 19 files.
+3,946 lines total, 21 files (recomputed 2026-08-28). The list above is not exhaustive as of this count — `rerun_assets_manual.py` and `mcp_http_server.py` have been added since it was last written; see `git log --stat -- wiki_ingestion/` for the exact current file set.
 
 ## 2. The phases, in order, exactly what each does
 
@@ -33,7 +33,9 @@ This pipeline is a strict sequential pipeline, not a loop of independent jobs. P
 
 ### Phase 3 — Detect & Draft
 
-**Detection** (`detect.py`, `run_detection(cycle_id)`): for each of the email accounts (`raj_gmail`, `ron_gmail`, `remya_gmail`, `support_zoho`), plus `tickets`, `calls`, and one partition per client (`client_{slug}`):
+**Repo-docs sync (added 2026-08-28, runs before detection):** `run_pipeline.py` calls `ingestion.import_repo_docs.import_all()` first, every cycle, wrapped in try/except so a bad doc file can never block real ingestion. Previously this only ran when someone remembered the manual `python -m ingestion.import_repo_docs` command — meaning an edit to `docs/*.md`/`ARCHITECTURE.md` had genuinely no automatic path into the wiki. Re-running it here is safe (pure upsert; unchanged content produces no new `updated_at`) and is what gives the `repo_docs` partition below anything to detect.
+
+**Detection** (`detect.py`, `run_detection(cycle_id)`): for each of the email accounts (`raj_gmail`, `ron_gmail`, `remya_gmail`, `support_zoho`), plus `tickets`, `calls`, `assets`, `repo_docs`, and one partition per client (`client_{slug}`):
 1. Reads a cursor from `sync_cursors` under key `wiki_ingest_{source_kind}` — a **separate cursor namespace** from raw-ingestion's own cursors on the very same `sync_cursors` table.
 2. Pulls candidate rows updated since that cursor.
 3. Computes a SHA-256 content hash per row (including its full child-table content — email body, ticket description+events, transcript segments, task description+events).
@@ -128,10 +130,13 @@ UNION SELECT ... FROM call_transcripts ...
 UNION SELECT ... FROM tickets ...
 UNION SELECT ... FROM implementation_tasks t ON t.odoo_task_id = wc.source_id ...
 UNION SELECT ... FROM assets t ON t.id = wc.source_id ...
+UNION SELECT ... FROM repo_docs t ON t.id = wc.source_id ...
 ```
 then: `tier1` if any citation is tier1, else `tier2_confidential` if any is that, else `tier2`. One salary figure cited anywhere on a page is enough to restrict the entire page. A known collision risk: implementation-task citations key on `odoo_task_id`, which isn't unique across different clients — the join fails closed (whichever candidate, across any client sharing that id number, is most restrictive wins).
 
 **2026-08-25 fix**: the `assets` branch above was missing entirely until this date — added after a health audit found 32 live `wiki_citations` rows already using `source_type='asset'` (the assets ingestion path has been writing them since 2026-08-12) with no corresponding join, meaning a page citing only assets — including either of the two `tier2_confidential` assets (`eoxs-client-implementation-go-live-sop`, `eoxs-salary-details`) — would silently compute an empty `cited_tiers` set and default to the least-restrictive `tier2`. No page was actually mis-tiered by this in practice (the 3 asset-sourced pages promoted before the fix all happened to cite only `tier2` assets), but the gap was live and unguarded. Fixed in `wiki_ingestion/promote.py`.
+
+**2026-08-28 fix, same bug class, caught before any page shipped**: adding the `repo_docs` partition to detection (above) meant the drafting sub-agent could now cite `repo_docs` rows, but neither `agent_mcp_server.py`'s `add_staging_citation` tool schema nor this join recognized `source_type='repo_doc'` — every `repo_docs` row is hardcoded `tier1`, so a page citing only repo docs would have silently promoted to `tier2`, exposing internal engineering/infra detail (credentials layout, schema internals, redaction logic, per-identity secrets) to `hr`/`general`/`intern`. Fixed in the same commit that added the partition: the join above gained the `repo_docs` branch, the tool schema/description now names `'repo_doc'` explicitly, and `run_agent.py`'s prompt gained a `repo_docs`-specific notes block instructing the agent to always use `source_type='repo_doc'` for these rows, never `'asset'` or anything else.
 
 A **separate** classifier, `tier_classifier.py`, exists purely for the ~1,046 legacy pages imported before `promote.py` existed (whose citations are mostly unresolved, so the citation-max approach alone can't classify most of them). It runs an LLM content-classification pass first (fail-closed to `tier1` on error), then two SQL-only backstop passes that only ever *tighten* a tier, never loosen it: one upgrading from resolved raw citations, one propagating tier along wiki-page-cites-wiki-page links to a fixed point.
 

@@ -180,16 +180,45 @@ Write: `create_asset(slug, title, body)` · `update_asset(slug, body, title)`
 wiki automatically on the next scheduled synthesis cycle (every 6 hours) —
 no separate "publish" step exists or is needed.
 
-**Repo docs** (this repository's own reference material — every `docs/*.md`
-file, `ARCHITECTURE.md`, and a synthesized codebase-overview document; **you
-are the only identity that can see these** — every row is tier1) — read:
-`search_repo_docs(query)` · `list_repo_docs(doc_type="")` ·
-`get_repo_doc(identifier)`. `doc_type`: `doc` | `architecture` | `codebase` or
-omit for all. `identifier` is the numeric `id` (from list/search) or the
-document's `slug`. Read-only — no write tools exist for this table; it's kept
-in sync by re-running an import script, not edited live. Use this when a
-question is about how *this system itself* works (schema, MCP tools,
-access-tier rules, infra) rather than about EOXS the company.
+### Repo docs — navigating `eoxs-wiki-db`'s own reference material
+
+Reach for this whenever a question is about **how Cruz itself works** — its
+schema, its MCP tools and access-tier/redaction rules, its ingestion or
+wiki-synthesis pipeline, its infra/deployment — rather than about EOXS the
+company. Signs a question belongs here rather than in the synthesized wiki:
+it names a table, a tool, a service, a config file, or asks "how does X get
+into the wiki" / "what does this access tier mean" / "how is this server set
+up." **You are the only identity that can see this data — every row is
+hardcoded tier1**, so don't reference its existence to `hr`/`general`/`intern`.
+
+Tools: `search_repo_docs(query)` · `list_repo_docs(doc_type="")` ·
+`get_repo_doc(identifier)`.
+- `doc_type`: `doc` | `architecture` | `codebase`, or omit for all three.
+- `identifier` on `get_repo_doc` is the numeric `id` (from a list/search
+  result) or the document's `slug` — same id-first convention as every other
+  eoxs-db tool (§4 intro).
+- Start broad with `search_repo_docs` or `list_repo_docs` when you don't
+  already know the exact document; go straight to `get_repo_doc` once you
+  have an id/slug from a prior call or from context.
+- Read-only — no write tools exist for this table, deliberately (the only two
+  writable tables anywhere on eoxs-db are employees and assets, §5.1/§5.2).
+
+**What's in here, concretely:** every `docs/*.md` file in the repo
+(architecture deep-dives, the Postgres schema reference, raw-ingestion and
+wiki-ingestion internals, the Linear integration, local-dev setup),
+`ARCHITECTURE.md` (the plain-language overview), and one synthesized
+codebase-overview document describing the repo's directory layout — no
+single source file plays that last role, so it's generated rather than
+copied from one.
+
+**Freshness — this is a live-synced source, not a frozen snapshot.** As of
+2026-08-28, `ingestion/import_repo_docs.py` runs automatically at the start
+of every 6-hourly wiki-ingestion cycle (previously it was a manual,
+easy-to-forget step) — so an edit to any of those files reaches
+`get_repo_doc`/`search_repo_docs` on the very next cycle, and separately
+flows into a synthesized, cited wiki page the same way any other raw source
+does. If a user asks about something that was "just changed" in this repo,
+this tool set is current within one cycle, not stale.
 
 **Clients** — `get_client_profile(client)` · `list_contacts(client)` · `list_clients()` · `get_client_file(file_path)`
 `get_client_file` is the one exception to the id rule: it takes a

@@ -152,12 +152,17 @@ listed above plus `ARCHITECTURE.md` and a synthesized codebase overview, into a 
   deliberately, same as every table except `employees`/`assets`). Every row is hardcoded
   `tier1`, i.e. visible only to `full`/`ayan` (FULL_CLEARANCE) — `hr`/`general`/`intern` get
   an empty result from all three tools, same mechanism as any other tier1-only content, not a
-  separate restriction. Seeded/kept in sync by re-running
-  `ingestion/import_repo_docs.py` (manual, re-runnable — no ongoing fetcher, same pattern as
-  `ingestion/import_assets.py`). Landed alongside deleting two superseded docs
+  separate restriction. Landed alongside deleting two superseded docs
   (`docs/infrastructure-roadmap.md`, `docs/handoff-access-tier-dev.md`) — both are excluded
   from the import since they no longer exist. **Tool totals now**: `full`/`ayan` 32 (23 read +
   7 employee + 2 asset-write), `hr` 31, `general`/`intern` 23. See `docs/backend-server.md` §5.
+  **2026-08-28: `ingestion/import_repo_docs.py` now runs automatically at the start of every
+  `wiki_ingestion/run_pipeline.py` cycle** (every 6 hours), and `detect.py` gained a
+  `candidates_repo_docs()` partition (same shape as `assets`'). Previously the import was
+  manual-only, meaning a doc edit had literally no path into the synthesized wiki until
+  someone remembered to run it — now editing any tracked doc flows into a cited wiki page on
+  the next scheduled cycle, same as any other raw source. See `docs/wiki-ingestion.md` Phase 3
+  and `docs/backend-server.md` §5.5.
 
 ## Standing practices for this repo
 

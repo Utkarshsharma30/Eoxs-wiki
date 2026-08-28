@@ -34,7 +34,7 @@ ingestion/
   retry.py                          38  shared retry helper
   _check_env.py                     40  env-var-presence diagnostic (has some stale names — see §12)
 ```
-4,064+ lines total, 27 files (line count not recomputed since oauth_gmail.py/oauth_zoho.py/import_assets.py were added — see git for exact current counts).
+5,799 lines total, 33 files (recomputed 2026-08-28). The list above is not exhaustive as of this count — `backfill_attachments.py`, `attachment_extract.py`, `backfill_call_dates.py`, `tz.py`, and `import_repo_docs.py` (§ below) have been added since it was last written; see `git log --stat -- ingestion/` for the exact current file set.
 
 ## 2. Each fetcher, in detail
 

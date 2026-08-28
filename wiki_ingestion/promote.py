@@ -115,13 +115,22 @@ def promote_page(staging_page_id):
             # Reliable here (unlike the old vault-imported pages) because the
             # agent resolves source_id against a real row before ever calling
             # add_staging_citation -- see agent_mcp_server.py, which only
-            # allows the four real raw source_types, no 'unresolved'/
+            # allows the six real raw source_types, no 'unresolved'/
             # 'wiki_page' escape hatch. Implementation-task citations store
             # source_id as odoo_task_id, which collides across clients (no
             # client_id on the citation row) -- the join below doesn't try to
             # disambiguate, it just fails closed: whichever cited candidate
             # (across every client sharing that id number) is most
             # restrictive wins.
+            #
+            # 2026-08-28: added the repo_docs join. Its absence was the exact
+            # bug class fixed for 'asset' on 2026-08-25 (see
+            # docs/wiki-ingestion.md) waiting to recur -- every repo_docs row
+            # is hardcoded tier1, but a page citing only repo_docs rows would
+            # otherwise compute an empty cited_tiers set and default to the
+            # least-restrictive tier2, exposing internal engineering/infra
+            # detail (credentials layout, schema internals, redaction logic)
+            # to hr/general/intern.
             cur.execute(
                 """
                 SELECT t.access_tier::text AS tier FROM wiki_citations wc JOIN email_threads t
@@ -143,8 +152,12 @@ def promote_page(staging_page_id):
                 SELECT t.access_tier::text FROM wiki_citations wc JOIN assets t
                   ON wc.source_type = 'asset' AND t.id = wc.source_id
                 WHERE wc.wiki_page_id = %s
+                UNION
+                SELECT t.access_tier::text FROM wiki_citations wc JOIN repo_docs t
+                  ON wc.source_type = 'repo_doc' AND t.id = wc.source_id
+                WHERE wc.wiki_page_id = %s
                 """,
-                (live_id, live_id, live_id, live_id, live_id),
+                (live_id, live_id, live_id, live_id, live_id, live_id),
             )
             cited_tiers = {row["tier"] for row in cur.fetchall()}
             if "tier1" in cited_tiers:

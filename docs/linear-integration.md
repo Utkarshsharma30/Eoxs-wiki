@@ -103,11 +103,11 @@ Every reporting call is wrapped in a try/except that logs a warning and returns 
 
 Separate from this project's own hand-rolled GraphQL client, this environment has access to a full official Linear MCP tool surface (`list_issues`, `get_issue`, `save_issue`, `list_comments`, `save_comment`, `list_projects`, `list_cycles`, `list_documents`, and many more — including attachment and diff-review tools). This gives genuine two-way capability (reading and reacting to comments, for example) that the current custom integration deliberately doesn't implement. A future developer wanting to add read-back capability (see §6) could build on this official surface directly instead of extending the hand-rolled GraphQL client — worth knowing about before writing a second, redundant Linear HTTP client from scratch.
 
-## 9. Current real state (as of 2026-08-25)
+## 9. Current real state (as of 2026-08-28)
 
-`wiki_ingest_board_state` has one row: `board_key='pending_drafts'`, pointing at Linear issue `EDB-37`. `ingest_log` shows the 2-hourly raw-ingestion sweep firing reliably. `wiki_ingest_cycles` shows the 6-hourly wiki pipeline running on schedule (roughly 00:00/06:00/12:00/18:00 UTC — cycle 98 as of this writing), almost entirely `status='done'`.
+`wiki_ingest_board_state` has one row: `board_key='pending_drafts'`, pointing at Linear issue `EDB-37`. `ingest_log` shows the 2-hourly raw-ingestion sweep firing reliably. `wiki_ingest_cycles` shows the 6-hourly wiki pipeline running on schedule (roughly 00:00/06:00/12:00/18:00 UTC — cycle 107 as of this writing, all recent cycles `status='done'`). `linear_parent_issue_id` is populated on 75 of 101 cycles; `wiki_ingest_batches.linear_issue_id` on 405 of 555 — both ratios climbing as expected (recent cycles have parent/batch issues; the unpopulated ones are early rows from before this reporting existed).
 
-`EDB-37`'s live title currently reads **"[BOARD] Wiki drafts pending approval (0 awaiting, 51 rejected)"** — 0 awaiting, not the "210 reviewed / 13 rejected" an earlier version of this doc recorded. Both numbers were accurate snapshots at their respective times; the count naturally sits near 0 "awaiting" now because promotion runs automatically after every review sweep (see `docs/wiki-ingestion.md` §2), so pages rarely linger in `reviewed` status long enough to accumulate a backlog the way they could when promotion was a manual, human-triggered step. Treat any number in this section as a point-in-time reading — query `wiki_staging.wiki_pages` or fetch `EDB-37` live for the current count, don't rely on what's written here.
+`EDB-37`'s live title as of 2026-08-28 (fetched directly via the Linear GraphQL API, `LINEAR_EDB_API_KEY`/`LINEAR_EDB_TEAM_KEY`) reads **"[BOARD] Wiki drafts pending approval (0 awaiting, 55 rejected)"**, `updatedAt` 2026-08-28T06:11:35Z — matching the last wiki-pipeline cycle's finish time exactly, confirming the board genuinely refreshes every cycle rather than just holding a stale title. 0 awaiting is expected, not a sign of a stalled board: promotion runs automatically after every review sweep (see `docs/wiki-ingestion.md` §2), so pages rarely linger in `reviewed` status long enough to accumulate a backlog the way they could when promotion was a manual, human-triggered step. Treat any number in this section as a point-in-time reading — query `wiki_staging.wiki_pages` or fetch `EDB-37` live for the current count, don't rely on what's written here.
 
 **A known, separately-tracked staleness**: `wiki_ingest_board_state.updated_at` for this row is stuck at `2026-08-04`, even though the actual Linear issue (`EDB-37`) is genuinely current — confirmed by fetching it live above. `report_pending_drafts_board()`'s `_set_board_issue()` (which sets `updated_at = now()`) is only called on the first-ever creation of the board issue; every subsequent refresh only calls Linear's `issueUpdate` and never touches the DB row's `updated_at` again. Harmless in practice (the Linear issue itself is what matters and it does refresh correctly), but don't use this column to judge whether the board is being kept current — check the Linear issue directly instead.
 
@@ -117,8 +117,8 @@ Separate from this project's own hand-rolled GraphQL client, this environment ha
 
 ## 11. Key files, in reading order for a new developer
 
-1. `ingestion/linear_report.py` — the GraphQL client + raw-sweep report (262 lines)
-2. `wiki_ingestion/linear_report.py` — the four phase reports + persistent board (354 lines)
+1. `ingestion/linear_report.py` — the GraphQL client + raw-sweep report (360 lines)
+2. `wiki_ingestion/linear_report.py` — the four phase reports + persistent board (564 lines)
 3. `schema/021_wiki_board_state.sql` — the `wiki_ingest_board_state` table definition
 4. `ingestion/server.py` (the `_run_bg`/`main`/`/trigger/manual` sections) — where/how raw-sweep reporting actually gets triggered
 5. `deploy/eoxs-sweep.timer`, `deploy/eoxs-wiki-pipeline.timer` — the two cron cadences that ultimately drive all of this

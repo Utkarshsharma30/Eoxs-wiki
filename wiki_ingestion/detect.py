@@ -167,6 +167,27 @@ def candidates_assets(since):
     return rows
 
 
+def candidates_repo_docs(since):
+    """repo_docs (schema/034_repo_docs.sql) -- this repository's own
+    docs/*.md files, ARCHITECTURE.md, and the synthesized codebase-overview
+    document, imported 2026-08-26 via ingestion/import_repo_docs.py. Same
+    shape as candidates_assets above: no external API feed, so a new
+    updated_at here only ever comes from that script being re-run after a
+    doc edit -- see run_pipeline.py, which now runs it automatically at the
+    start of every cycle specifically so this partition has something to
+    detect without anyone remembering a manual step."""
+    sql = "SELECT id, slug, title, body, updated_at FROM repo_docs WHERE 1=1"
+    params = []
+    if since:
+        sql += " AND updated_at > %s"
+        params.append(since)
+    sql += " ORDER BY updated_at ASC"
+    rows = _candidate_rows(sql, params)
+    for row in rows:
+        row["_content_hash"] = _hash_content(row["title"], row["body"])
+    return rows
+
+
 def _implementation_task_content(task_id):
     conn = get_live_conn()
     try:
@@ -281,6 +302,7 @@ def build_all_candidates(since_by_kind=None):
     partitions["tickets"] = candidates_tickets(since_by_kind.get("tickets"))
     partitions["calls"] = candidates_calls(since_by_kind.get("calls"))
     partitions["assets"] = candidates_assets(since_by_kind.get("assets"))
+    partitions["repo_docs"] = candidates_repo_docs(since_by_kind.get("repo_docs"))
 
     for slug in list_client_slugs():
         source_kind = f"client_{slug}"
@@ -321,6 +343,14 @@ def run_detection(cycle_id=None, advance_cursors=True):
         partitions["assets"] = changed
     if advance_cursors:
         set_cursor("assets", run_started_at)
+
+    since = get_cursor("repo_docs")
+    candidates = candidates_repo_docs(since)
+    changed, skipped = filter_unchanged("repo_docs", candidates, cycle_id)
+    if changed:
+        partitions["repo_docs"] = changed
+    if advance_cursors:
+        set_cursor("repo_docs", run_started_at)
 
     since = get_cursor("calls")
     candidates = candidates_calls(since)

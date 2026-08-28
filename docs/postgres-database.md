@@ -283,26 +283,26 @@ Only two exist, identically in both databases: `plpgsql` (bundled default) and `
 
 No other application-relevant roles exist (the rest are Postgres 16's built-in `pg_*` predefined roles, unused here).
 
-## 7. Real current row counts (live `eoxs_wiki`, as of 2026-08-12)
+## 7. Real current row counts (live `eoxs_wiki`, as of 2026-08-28)
 
 | Table | Rows |
 |---|---|
-| call_segments | 179,058 |
-| email_messages | 59,728 |
-| email_threads | 30,489 |
-| email_attachments | 20,578 |
-| wiki_links | 13,628 |
-| call_transcripts | 2,387 |
-| wiki_pages | 1,348 |
+| call_segments | 184,984 |
+| email_messages | 67,238 |
+| email_threads | 34,889 |
+| email_attachments | 22,812 |
+| wiki_links | 14,083 |
+| call_transcripts | 2,416 |
+| wiki_pages | 1,909 |
 | implementation_tasks | 828 |
-| wiki_citations | 2,196 |
-| wiki_flags | 1,064 |
+| wiki_citations | 4,250 |
+| wiki_flags | 1,703 |
 | implementation_task_events | 5,613 |
 | implementation_task_attachments | 686 |
-| mcp_redaction_log | 335 |
-| ticket_events | 104 |
+| mcp_redaction_log | 1,359 |
+| ticket_events | 107 |
 | tickets | 14 |
-| ticket_attachments | 1 |
+| ticket_attachments | 2 |
 | sales_orders | 0 |
 | order_lines | 0 |
 | sales_order_events | 0 |
@@ -310,19 +310,22 @@ No other application-relevant roles exist (the rest are Postgres 16's built-in `
 | invoice_lines | 0 |
 | clients | 8 |
 | contacts | 56 |
-| sync_cursors | 28 |
-| ingest_log | 117 |
-| schema_migrations | 24 |
-| wiki_ingest_cycles | 39 |
-| wiki_ingest_batches | 190 |
+| sync_cursors | 33 |
+| ingest_log | 305 |
+| schema_migrations | 34 |
+| wiki_ingest_cycles | 101 |
+| wiki_ingest_batches | 555 |
 | wiki_ingest_board_state | 1 |
-| wiki_staging.wiki_pages | 425 |
+| wiki_staging.wiki_pages | 1,279 |
+| assets | 19 |
+| repo_docs | 12 |
+| employees | 115 |
 
-`tickets`/`ticket_events` are **not zero and not static** — 14 rows now, up from 2 a few hours prior at the time of writing, direct live evidence of the known lingering sweep bug (`docs/raw-ingestion.md` §12): the MCP-tool-surface removal and the historical-row deletion both happened, but the recurring sweep's `tickets_fetcher.py` invocation was never actually removed, so it keeps writing new rows nobody can query through Cruz anymore. `sales_orders`/`invoices` show the fully-removed, non-regrowing state — the fix that worked for one didn't get applied to the other.
+`tickets`/`ticket_events` remain **not zero and not static** — 14/107 rows, same lingering sweep bug as before (`docs/raw-ingestion.md` §12): the MCP-tool-surface removal and the historical-row deletion both happened, but the recurring sweep's `tickets_fetcher.py` invocation was never actually removed, so it keeps writing new rows nobody can query through Cruz anymore. `sales_orders`/`invoices` show the fully-removed, non-regrowing state — the fix that worked for one didn't get applied to the other. `assets` (19) and `repo_docs` (12) are both new categories since the 2026-08-12 snapshot — see `docs/raw-ingestion.md` §2 Assets and `docs/backend-server.md` §5.5.
 
-**`access_tier` breakdown, `wiki_pages` (live):** 39 tier1 / 753 tier2_confidential / 556 tier2.
+**`access_tier` breakdown, `wiki_pages` (live):** 53 tier1 / 1,100 tier2_confidential / 756 tier2.
 
-**`wiki_staging.wiki_pages` status (425 total):** 21 rejected, 404 promoted, 0 draft, 0 reviewed — the multi-hundred-page promotion backlog documented as a known issue in earlier snapshots of this system has since been fully cleared; see `docs/wiki-ingestion.md` §8.
+**`wiki_staging.wiki_pages` status (1,279 total):** 55 rejected, 1,224 promoted, 0 draft, 0 reviewed — consistent with promotion running automatically after every review sweep (see `docs/wiki-ingestion.md` §2); pages don't linger in `reviewed` status long enough to accumulate a backlog.
 
 ## 8. Staging database (`eoxs_wiki_staging`)
 
@@ -338,7 +341,7 @@ Table structure is **exactly identical** to live (same 2 schemas, same extension
 
 **`access_tier` values differ meaningfully between live and staging** — staging still mostly shows the raw column *defaults* (e.g. `email_threads` in staging: 30,333 tier1 / 10 tier2_confidential / 41 tier2, vs. live's 1,449/5,753/23,182 split). This is because the tier-classification backfill (`ingestion/tier_classifier.py`) has only ever been run against live — this is expected current-state drift, not a dual-write bug (classification is a separate batch job, not part of the write path itself).
 
-Database sizes (as of 2026-08-11): `eoxs_wiki` ≈ 525 MB, `eoxs_wiki_staging` ≈ 336 MB. No automated backup of either database exists yet — see the DigitalOcean migration roadmap and the infrastructure punch list for the plan to close this gap (either a scheduled `pg_dump` to object storage, or migrating to a managed Postgres service with automated backups built in).
+Database sizes (as of 2026-08-28): `eoxs_wiki` ≈ 565 MB, `eoxs_wiki_staging` ≈ 366 MB. No automated backup of either database exists yet — see the DigitalOcean migration roadmap and the infrastructure punch list for the plan to close this gap (either a scheduled `pg_dump` to object storage, or migrating to a managed Postgres service with automated backups built in).
 
 ## 9. `wiki_staging` — the schema, not to be confused with the database
 
