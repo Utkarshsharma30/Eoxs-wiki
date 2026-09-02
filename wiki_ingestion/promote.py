@@ -110,8 +110,15 @@ def promote_page(staging_page_id):
             )
 
             # Access-tier: MAX (most restrictive) of every citation just copied
-            # above, across the 3-level scheme (tier1 = Raj-personal >
+            # above, across the 4-level scheme (tier1 = Raj-personal >
+            # tier2_confidential_hr = HR-only financial/personnel content >
             # tier2_confidential = company-confidential > tier2 = general).
+            # 2026-09-02: tier2_confidential_hr added (schema/035_
+            # tier2_confidential_hr.sql) -- a page citing an HR-tiered raw
+            # row (e.g. the salary register asset) must upgrade to
+            # tier2_confidential_hr, not fall through to plain
+            # tier2_confidential, or it would leak HR content to `general`
+            # again through the promotion path despite the row-level split.
             # Reliable here (unlike the old vault-imported pages) because the
             # agent resolves source_id against a real row before ever calling
             # add_staging_citation -- see agent_mcp_server.py, which only
@@ -162,6 +169,8 @@ def promote_page(staging_page_id):
             cited_tiers = {row["tier"] for row in cur.fetchall()}
             if "tier1" in cited_tiers:
                 access_tier = "tier1"
+            elif "tier2_confidential_hr" in cited_tiers:
+                access_tier = "tier2_confidential_hr"
             elif "tier2_confidential" in cited_tiers:
                 access_tier = "tier2_confidential"
             else:

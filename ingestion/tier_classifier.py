@@ -1,18 +1,27 @@
 """Bulk access-tier classifier for Cruz's tiered access system. Reads real
-content, decides one of three levels, fail-closed (more restrictive) on
+content, decides one of four levels, fail-closed (more restrictive) on
 any uncertainty, API error, or exhausted retries:
 
-  tier1              Raj's own personal data ONLY (bank statements,
-                      divorce, family/personal-life matters). No company
-                      business, even if company-sensitive.
-  tier2_confidential Company-confidential: salary/payroll/compensation/
-                      incentive/bonus for ANY employee, investor relations
-                      & fundraising, company financial statements/bank
-                      data, vendor payment terms / sensitive pricing
-                      contracts, legal/compliance matters (non-Raj-
-                      personal), employee activity/performance/
-                      productivity monitoring data (e.g. Cattr).
-  tier2              General -- everything else, company-wide visible.
+  tier1                 Raj's own personal data ONLY (bank statements,
+                         divorce, family/personal-life matters). No company
+                         business, even if company-sensitive.
+  tier2_confidential_hr Employee-facing HR/financial content: payroll/
+                         salary/compensation/incentive/bonus for ANY
+                         employee, onboarding/offboarding, disciplinary
+                         action (penalisation, suspension), sensitive
+                         credential material. Carved out of
+                         tier2_confidential 2026-09-02 (see
+                         schema/035_tier2_confidential_hr.sql) so it is
+                         structurally invisible to the `general` (internal
+                         team) MCP identity, not just redacted at query
+                         time.
+  tier2_confidential    Company-confidential: investor relations &
+                         fundraising, company financial statements/bank
+                         data, vendor payment terms / sensitive pricing
+                         contracts, legal/compliance matters (non-Raj-
+                         personal), employee activity/performance/
+                         productivity monitoring data (e.g. Cattr).
+  tier2                 General -- everything else, company-wide visible.
 
 Second-generation version of this script: the first one only had 2 levels
 (tier1 = Raj-personal + company-confidential conflated together) and only
@@ -28,6 +37,15 @@ Writes are incremental (one UPDATE per row immediately after its verdict,
 not batched at the end) -- the first version's first run was killed
 mid-flight and lost 100% of its progress because it only wrote at the very
 end.
+
+Judge by actual content, never by a document's own self-declared label
+(e.g. "Internal and Confidential" in a document's front-matter is not
+itself evidence of confidential content) -- found live 2026-09-02: an
+onboarding SOP had landed in tier2_confidential purely because of its own
+front-matter label, with no actually-confidential content. See
+ingestion/reclassify_hr_tier.py for the one-time re-scan this and the HR
+split both required for existing rows; this script is what catches drift
+on a periodic re-run afterward.
 """
 import asyncio
 import logging
@@ -46,19 +64,32 @@ _MAX_CONTEXT_CHARS = 2000
 CONCURRENCY = 10
 MAX_RETRIES = 5
 
-_PROMPT = """You are classifying an item in Cruz, EOXS's internal knowledge base, for access control.
+_PROMPT = """You are classifying an item in Cruz, EOXS's internal knowledge base, for access control. \
+Judge STRICTLY by the item's actual content -- never by a self-declared label like "Confidential" \
+or "Internal and Confidential" appearing in the document's own text or front-matter. A document \
+calling itself confidential is not evidence of anything; only the real substance counts.
 
-Decide exactly one of three levels:
+Decide exactly one of four levels:
 
 TIER1 -- Rajat "Raj" Jain's own PERSONAL data only:
 - Raj's personal financial information (bank statements, personal investments, personal taxes)
 - Divorce, family, or other personal/private life matters involving Raj
 - Any other content that is personal to Raj rather than EOXS company business
 Do NOT use TIER1 for company business, even if Raj is the sender/participant and even if it's
-company-sensitive -- that belongs in TIER2_CONFIDENTIAL below.
+company-sensitive -- that belongs in TIER2_CONFIDENTIAL_HR or TIER2_CONFIDENTIAL below.
 
-TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
-- Salary, payroll, compensation, incentive, or bonus figures for ANY employee (including Raj's own)
+TIER2_CONFIDENTIAL_HR -- Employee-facing HR/financial content:
+- Payroll, salary, compensation, incentive, or bonus figures or discussion for ANY employee
+  (including Raj's own)
+- Onboarding or offboarding paperwork/process (offer letters, exit process, final settlement)
+- Disciplinary action: penalisation, suspension, termination-for-cause detail
+- Sensitive credential material: account/system passwords, access-recovery secrets, login details
+Use this ONLY when the item's actual content is genuinely about one of these -- not merely a
+document that happens to be HR-adjacent (e.g. an ordinary onboarding SOP describing the general
+process with no real person's compensation/discipline/credential detail is NOT this category, it's
+TIER2 or plain TIER2_CONFIDENTIAL).
+
+TIER2_CONFIDENTIAL -- Other EOXS company-confidential business data:
 - Investor relations and fundraising
 - Company financial statements or bank/accounting data
 - Vendor payment terms or contracts with sensitive pricing
@@ -68,18 +99,23 @@ TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
 
 TIER2 -- General, visible company-wide: ordinary business correspondence, client implementation/
 support work, product/ops, sales orders, scheduling, recruiting (non-compensation details), and
-other everyday professional content -- the default for anything not clearly TIER1 or
-TIER2_CONFIDENTIAL.
+other everyday professional content -- the default for anything not clearly TIER1,
+TIER2_CONFIDENTIAL_HR, or TIER2_CONFIDENTIAL.
 
 When genuinely uncertain between two adjacent levels, prefer the more restrictive one (fail closed):
-TIER2_CONFIDENTIAL over TIER2, or TIER1 over TIER2_CONFIDENTIAL if it's plausibly Raj's personal
-matter rather than company business.
+TIER2_CONFIDENTIAL_HR or TIER2_CONFIDENTIAL over TIER2, or TIER1 over either confidential level if
+it's plausibly Raj's personal matter rather than company business.
 
 {context}
 
-Answer with exactly one word: TIER1, TIER2_CONFIDENTIAL, or TIER2."""
+Answer with exactly one word: TIER1, TIER2_CONFIDENTIAL_HR, TIER2_CONFIDENTIAL, or TIER2."""
 
-_VALID = {"TIER1": "tier1", "TIER2_CONFIDENTIAL": "tier2_confidential", "TIER2": "tier2"}
+_VALID = {
+    "TIER1": "tier1",
+    "TIER2_CONFIDENTIAL_HR": "tier2_confidential_hr",
+    "TIER2_CONFIDENTIAL": "tier2_confidential",
+    "TIER2": "tier2",
+}
 
 
 def _fetch_pending(conn):
@@ -136,6 +172,10 @@ async def _classify_one(client, sem, context):
                     messages=[{"role": "user", "content": _PROMPT.format(context=context)}],
                 )
                 answer = resp.content[0].text.strip().upper()
+                # Check the HR variant BEFORE the plain one -- "TIER2_CONFIDENTIAL" is
+                # a substring of "TIER2_CONFIDENTIAL_HR", so the order matters here.
+                if "TIER2_CONFIDENTIAL_HR" in answer:
+                    return "tier2_confidential_hr"
                 if "TIER2_CONFIDENTIAL" in answer:
                     return "tier2_confidential"
                 if "TIER1" in answer:
@@ -159,7 +199,7 @@ async def _run(conn, items):
     client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
     sem = asyncio.Semaphore(CONCURRENCY)
     completed = 0
-    counts = {"tier1": 0, "tier2_confidential": 0, "tier2": 0}
+    counts = {"tier1": 0, "tier2_confidential_hr": 0, "tier2_confidential": 0, "tier2": 0}
     start = time.monotonic()
 
     async def worker(table, row_id, context):
@@ -194,8 +234,8 @@ def main():
 
         counts = asyncio.run(_run(conn, items))
         logger.info(
-            "totals: %d -> tier1, %d -> tier2_confidential, %d -> tier2",
-            counts["tier1"], counts["tier2_confidential"], counts["tier2"],
+            "totals: %d -> tier1, %d -> tier2_confidential_hr, %d -> tier2_confidential, %d -> tier2",
+            counts["tier1"], counts["tier2_confidential_hr"], counts["tier2_confidential"], counts["tier2"],
         )
 
         with conn.cursor() as cur:

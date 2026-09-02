@@ -21,22 +21,36 @@ server.py's build_server()) -- clearance is baked into each instance at
 construction time, never derived from anything in the request, so there's
 no header/param a client could send to widen its own access:
 
-  - MCP_URL_SECRET         -> FULL_CLEARANCE (tier1 + tier2_confidential +
-    tier2). This is the secret already live in claude.ai before tiering
-    existed -- left pointing at full access so whoever already has it
-    (presumably Raj) keeps working unchanged. Confirm who currently holds
-    this URL before handing it out further.
-  - MCP_HR_URL_SECRET      -> HR_CLEARANCE (tier2_confidential + tier2,
-    not tier1/Raj-personal). For HR and other explicitly-trusted roles.
-  - MCP_GENERAL_URL_SECRET -> HR_CLEARANCE (tier2_confidential + tier2,
-    not tier1/Raj-personal), plus extra_redact_categories=
-    ("monetary_amounts", "employee_activity_monitoring"): every dollar
-    figure gets stripped (including payroll -- unlike HR, no carve-out)
-    and Cattr/performance-monitoring content stays HR+full-only regardless
-    of the wider tier clearance. 2026-08-11: widened from tier2-only,
-    since most tier2_confidential pages carry a dollar figure alongside
-    otherwise-relevant general content that general shouldn't lose over
-    one number -- see redaction.py for the category definitions.
+  - MCP_URL_SECRET         -> FULL_CLEARANCE (tier1 + tier2_confidential_hr
+    + tier2_confidential + tier2). This is the secret already live in
+    claude.ai before tiering existed -- left pointing at full access so
+    whoever already has it (presumably Raj) keeps working unchanged.
+    Confirm who currently holds this URL before handing it out further.
+  - MCP_HR_URL_SECRET      -> HR_CLEARANCE (tier2_confidential_hr +
+    tier2_confidential + tier2, not tier1/Raj-personal). For HR and other
+    explicitly-trusted roles. Gained tier2_confidential_hr 2026-09-02 (see
+    schema/035_tier2_confidential_hr.sql) -- previously shared
+    tier2_confidential + tier2 outright with `general` below, meaning the
+    ONLY thing keeping payroll/onboarding/disciplinary/credential content
+    out of general's context was query-time redaction; now that content
+    structurally never reaches general's clearance list at all.
+  - MCP_GENERAL_URL_SECRET -> INTERNAL_TEAM_CLEARANCE (tier2_confidential +
+    tier2, NOT tier2_confidential_hr, NOT tier1/Raj-personal), plus
+    extra_redact_categories=("monetary_amounts", "employee_activity_monitoring"):
+    every dollar figure gets stripped (including payroll -- though payroll
+    content should now typically be excluded at the row level via the HR
+    tier split above, not reached at all) and Cattr/performance-monitoring
+    content stays HR+full-only regardless of the wider tier clearance.
+    2026-08-11: widened from tier2-only to tier2_confidential, since most
+    tier2_confidential pages carry a dollar figure alongside otherwise-
+    relevant general content that general shouldn't lose over one number --
+    see redaction.py for the category definitions. 2026-09-02: no longer
+    literally HR_CLEARANCE (see schema/035_tier2_confidential_hr.sql) --
+    general keeps the pre-split tier2_confidential + tier2 access exactly as
+    before, it just no longer picks up the new HR-only tier that HR gained.
+    The redaction categories above remain in place underneath as a fallback
+    safety net for tier2_confidential/tier2 rows that mention money/
+    monitoring content for reasons unrelated to the HR carve-out.
   - MCP_INTERN_URL_SECRET  -> GENERAL_CLEARANCE (tier2 only -- unlike
     general above, intern was NOT widened to tier2_confidential), plus
     extra_redact_categories=("monetary_amounts",): every tool response
@@ -47,16 +61,23 @@ no header/param a client could send to widen its own access:
 2026-08-12: `full` and `hr` also get the employees.py tool set (the first
 write-capable tools this server has ever exposed) -- list/search/get plus
 create/update/deactivate/reactivate_employee, gated independently of
-`clearance` via `enable_employee_tools` (general/intern get none of it,
-even though `general` otherwise shares HR_CLEARANCE with `hr`). See
-mcp_server/employees.py and schema/025_employees.sql.
+`clearance` via `enable_employee_tools` (general/intern get none of it;
+before 2026-09-02 `general` shared HR_CLEARANCE with `hr` for read tools
+even though employee tools were withheld anyway -- now `general` has its
+own INTERNAL_TEAM_CLEARANCE, see above). See mcp_server/employees.py and
+schema/025_employees.sql.
 
 2026-08-13: `full` and `hr` also get mcp_server/asset_writes.py's
 create_asset/update_asset -- the second and, per explicit instruction, last
 write surface in this server. `full` is unrestricted; `hr` gets
 update_asset ONLY, and only for `SALARY_ASSET_SLUG` ('eoxs-salary-details')
 -- any other slug is refused with a plain permission error. general/intern
-get neither tool. See schema/032_asset_change_log.sql.
+get neither tool. See schema/032_asset_change_log.sql. 2026-09-02: this
+asset's access_tier was reclassified to tier2_confidential_hr as part of
+the HR-tier split (see schema/035_tier2_confidential_hr.sql) -- this write
+restriction is unrelated and unchanged by that, since it was never about
+which tier the asset sits at, only which identity may write to that one
+slug.
 
 2026-08-13: a 5th identity, `staging_qa`, exists purely for QA-testing
 write behavior (does the model create/update the right rows, does it ever
@@ -98,7 +119,7 @@ from starlette.responses import Response
 
 from mcp.server.sse import SseServerTransport
 
-from mcp_server.server import build_server, FULL_CLEARANCE, HR_CLEARANCE, GENERAL_CLEARANCE
+from mcp_server.server import build_server, FULL_CLEARANCE, HR_CLEARANCE, INTERNAL_TEAM_CLEARANCE, GENERAL_CLEARANCE
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -133,8 +154,7 @@ SALARY_ASSET_SLUG = "eoxs-salary-details"
 
 IDENTITIES = [
     # 5th element: enable_employee_tools (see server.py's build_server()
-    # docstring) -- general/intern get NO employee tools at all, even
-    # though 'general' otherwise shares HR_CLEARANCE's clearance with 'hr'.
+    # docstring) -- general/intern get NO employee tools at all.
     # 6th element: asset_write_scope -- "all" (full, unrestricted),
     # a specific slug set (hr, salary register only), or None (general/
     # intern, no asset write tools at all). Independent of `clearance` for
@@ -147,16 +167,20 @@ IDENTITIES = [
     ("full", os.environ["MCP_URL_SECRET"], FULL_CLEARANCE, (), True, "all", None),
     ("ayan", os.environ["MCP_AYAN_URL_SECRET"], FULL_CLEARANCE, (), True, "all", None),  # 2026-08-21 apex: Ayan own write-capable identity (mirror of full; changed_by=ayan)
     ("hr", os.environ["MCP_HR_URL_SECRET"], HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {SALARY_ASSET_SLUG}, None),
-    # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to HR_CLEARANCE
-    # (tier2_confidential + tier2) -- most tier2_confidential pages carry a
+    # 2026-08-11: expanded from GENERAL_CLEARANCE (tier2 only) to
+    # tier2_confidential + tier2 -- most tier2_confidential pages carry a
     # dollar figure alongside otherwise-relevant general content, and general
     # was losing the whole page over one number. Same URL/secret as before,
     # so nothing breaks for anyone who already has this link -- it now just
     # returns more, redacted content. monetary_amounts blocks every dollar
-    # figure (including payroll -- unlike hr's non_payroll_monetary_amounts
-    # carve-out); employee_activity_monitoring keeps Cattr/performance data
+    # figure; employee_activity_monitoring keeps Cattr/performance data
     # HR+full-only regardless of the wider tier clearance (see redaction.py).
-    ("general", os.environ["MCP_GENERAL_URL_SECRET"], HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None, None),
+    # 2026-09-02: was HR_CLEARANCE (literally shared with `hr`) until the
+    # tier2_confidential_hr split -- now INTERNAL_TEAM_CLEARANCE, which is
+    # the pre-split tier2_confidential + tier2 list, deliberately excluding
+    # the new HR-only tier. See schema/035_tier2_confidential_hr.sql and the
+    # module docstring above.
+    ("general", os.environ["MCP_GENERAL_URL_SECRET"], INTERNAL_TEAM_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None, None),
     ("intern", os.environ["MCP_INTERN_URL_SECRET"], GENERAL_CLEARANCE, ("monetary_amounts",), False, None, None),
     # staging_qa: full clearance, every read tool, BOTH write tool sets
     # fully unrestricted (unlike hr's real-world restrictions -- there's

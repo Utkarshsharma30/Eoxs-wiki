@@ -16,16 +16,33 @@ transport (http_server.py) is where the real boundary lives: it builds a
 SEPARATE Server instance per identity, each closed over its own clearance,
 mounted at its own secret URL path.
 
-Three levels, additive by role (see schema/020_tier2_confidential.sql for
-the full definition):
-  tier1              Raj's own personal data, PLUS (2026-08-26) this
-                      repository's own docs/architecture/codebase reference
-                      (repo_docs table) -- internal engineering/ops detail
-                      with no reason to be visible past `full`. FULL_CLEARANCE only.
-  tier2_confidential Company-confidential (salary/payroll, investor
-                      relations, financial statements, vendor contracts,
-                      legal/compliance). FULL_CLEARANCE + HR_CLEARANCE.
-  tier2              General, everyone. All three clearances.
+Four levels, additive by role (see schema/020_tier2_confidential.sql and
+schema/035_tier2_confidential_hr.sql for the full definitions):
+  tier1                 Raj's own personal data, PLUS (2026-08-26) this
+                         repository's own docs/architecture/codebase
+                         reference (repo_docs table) -- internal
+                         engineering/ops detail with no reason to be
+                         visible past `full`. FULL_CLEARANCE only.
+  tier2_confidential_hr (2026-09-02) Employee-facing HR/financial content:
+                         payroll/salary/compensation/incentive/bonus,
+                         onboarding/offboarding, disciplinary action
+                         (penalisation, suspension), sensitive credential
+                         material. Carved out of tier2_confidential so it
+                         is invisible to `general` (internal team) even
+                         before the redaction layer runs -- previously the
+                         only thing keeping this out of general's
+                         responses was query-time redaction stripping
+                         monetary_amounts/employee_activity_monitoring
+                         after the row was already visible.
+                         FULL_CLEARANCE + HR_CLEARANCE only.
+  tier2_confidential    Company-confidential, everything else in the old
+                         bucket (investor relations, financial statements,
+                         vendor contracts, legal/compliance, employee
+                         activity/performance monitoring). FULL_CLEARANCE +
+                         HR_CLEARANCE + the clearance list bound to
+                         `general` (internal team) -- unchanged from before
+                         this split.
+  tier2                 General, everyone. All four clearances.
 
 Wiki tools (get_wiki_page/search_wiki) ARE tier-filtered now that
 wiki-page access-tier computation is built (wiki_ingestion/promote.py for
@@ -51,8 +68,14 @@ from mcp_server.repo_docs import REPO_DOCS_TOOLS, tool_defs as repo_docs_tool_de
 
 BODY_PREVIEW_CHARS = 1500  # full body is often 10-50K chars; a preview keeps get_* calls usable
 
-FULL_CLEARANCE = ["tier1", "tier2_confidential", "tier2"]
-HR_CLEARANCE = ["tier2_confidential", "tier2"]
+FULL_CLEARANCE = ["tier1", "tier2_confidential_hr", "tier2_confidential", "tier2"]
+HR_CLEARANCE = ["tier2_confidential_hr", "tier2_confidential", "tier2"]
+# 2026-09-02: 'general' (internal team) used to share HR_CLEARANCE outright.
+# Now given its own constant, explicitly excluding tier2_confidential_hr --
+# this is the actual enforcement point for "internal team never sees the HR
+# tier, pre-redaction", not just a redaction-layer filter. See
+# schema/035_tier2_confidential_hr.sql and http_server.py's IDENTITIES.
+INTERNAL_TEAM_CLEARANCE = ["tier2_confidential", "tier2"]
 GENERAL_CLEARANCE = ["tier2"]
 
 # ---------------------------------------------------------------------------

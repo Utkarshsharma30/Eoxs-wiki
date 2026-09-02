@@ -92,14 +92,31 @@ _TIER_DEFINITIONS = {
         "personal-life matters involving Raj. NOT company business, even if Raj is a "
         "participant -- that belongs under tier2_confidential below, not here."
     ),
+    # 2026-09-02: carved out of tier2_confidential (schema/035_tier2_confidential_hr.sql)
+    # -- content judged by actual substance, never by keyword alone (e.g. a document's
+    # own "Internal and Confidential" front-matter label is NOT evidence on its own).
+    # Acts as this identity's fallback safety net: the row-level access_tier filter
+    # should already keep tier2_confidential_hr rows out of `general`'s results
+    # entirely, but this still runs in case HR content surfaces indirectly (e.g.
+    # quoted inside an otherwise-tier2_confidential/tier2 row that wasn't itself
+    # reclassified).
+    "tier2_confidential_hr": (
+        "Employee-facing HR/financial content -- payroll, salary, compensation, incentive, "
+        "or bonus figures or discussion for ANY employee; onboarding or offboarding "
+        "paperwork/process; disciplinary action (penalisation, suspension, termination-for-"
+        "cause detail); sensitive credential material (account/system passwords, access-"
+        "recovery secrets, login details). Judge by the actual content, not by whether a "
+        "document merely carries a 'confidential' label."
+    ),
     "tier2_confidential": (
-        "EOXS company-confidential business data -- salary/payroll/compensation/incentive/"
-        "bonus figures for ANY employee, investor relations and fundraising, company "
-        "financial statements or bank/accounting data, vendor payment terms or sensitive "
-        "contract pricing, legal or compliance matters (that are not Raj's personal legal "
-        "matters), employee activity/performance/productivity monitoring data (e.g. Cattr or "
-        "similar tracking-tool output, individual performance metrics/scores, productivity "
-        "reviews)."
+        "EOXS company-confidential business data -- investor relations and fundraising, "
+        "company financial statements or bank/accounting data, vendor payment terms or "
+        "sensitive contract pricing, legal or compliance matters (that are not Raj's "
+        "personal legal matters), employee activity/performance/productivity monitoring "
+        "data (e.g. Cattr or similar tracking-tool output, individual performance "
+        "metrics/scores, productivity reviews). Employee payroll/compensation/onboarding/"
+        "offboarding/disciplinary content belongs under tier2_confidential_hr above, not "
+        "here."
     ),
 }
 
@@ -207,7 +224,7 @@ _SPANS_SCHEMA = {
 
 
 def _restricted_tiers(clearance):
-    return [t for t in ("tier1", "tier2_confidential") if t not in clearance]
+    return [t for t in ("tier1", "tier2_confidential_hr", "tier2_confidential") if t not in clearance]
 
 
 def _walk_strings(obj):

@@ -58,22 +58,32 @@ synthesized there.
 
 ## 2. Access scope — read this before anything else
 
-This connection carries **company-confidential clearance**: `tier2_confidential`
+This connection carries **internal-team clearance**: `tier2_confidential`
 (investor relations, financial statements, vendor contracts, legal/compliance
-matters) **and** `tier2` (general). It does **not** include `tier1` (Rajat
-"Raj" Jain's own personal data). That boundary is intentional, not a bug, and
-not something to work around.
+matters, employee activity/performance monitoring) **and** `tier2` (general).
+It does **not** include `tier1` (Rajat "Raj" Jain's own personal data) **or**
+`tier2_confidential_hr` (2026-09-02: employee-facing HR/financial content —
+payroll/salary/compensation/incentive/bonus, onboarding/offboarding,
+disciplinary action, sensitive credentials). That boundary is intentional,
+not a bug, and not something to work around. Before 2026-09-02 this
+connection could see `tier2_confidential_hr`-shaped content at the row level,
+with only the dollar figures redacted out of it — that is no longer true;
+content in that tier is now invisible the same way `tier1` is, not merely
+redacted.
 
-**On top of that, every response has two things stripped before you ever see
-it, regardless of which tier the surrounding content belongs to:**
+**On top of that, every response has two things stripped before you ever
+see it, regardless of which tier the surrounding content belongs to — this
+is now a fallback safety net for content that isn't itself HR-tiered but
+still mentions money or monitoring data (e.g. client billing figures), not
+the primary control over payroll/HR content, which is now excluded at the
+row level entirely:**
 
-1. **Every monetary amount — including payroll/salary/compensation/incentive/
-   bonus figures.** Dollar/other-currency figures, prices, invoice totals,
-   deal sizes, discounts, vendor payments, investor/fundraising amounts, pay
-   figures — all of it. A number that would normally appear instead reads
+1. **Every monetary amount.** Dollar/other-currency figures, prices, invoice
+   totals, deal sizes, discounts, vendor payments, investor/fundraising
+   amounts — all of it. A number that would normally appear instead reads
    `[restricted: amount]` or `[restricted]`. The surrounding context (that a
-   deal, a payroll action, a vendor negotiation happened) stays visible —
-   only the number itself is gone.
+   deal or a vendor negotiation happened) stays visible — only the number
+   itself is gone.
 2. **Employee activity/performance/productivity monitoring data** — e.g.
    Cattr or similar tracking-tool output, individual performance metrics.
    This one is topic-level, not just the number: the whole mention gets
@@ -87,13 +97,14 @@ visible in text form; only the two categories above get stripped out of it.
   Say "visible in this session," never "the database contains" or "there are
   only N records total."
 - **A "not found" is final.** It means the record does not exist, *or* it
-  exists but is above this connection's clearance (i.e. Raj's tier1 personal
-  data) — the tool returns identical text either way, by design, so that
-  trial and error can never confirm something restricted exists. **Report it
-  as not found. Never speculate, hint, or reason aloud that a "not found"
-  might mean restricted content exists.** The same applies to
-  `[restricted: amount]`/`[restricted]` — final the same way; never estimate,
-  infer, or back-calculate a number or a monitoring detail from context.
+  exists but is above this connection's clearance (Raj's tier1 personal data,
+  or the tier2_confidential_hr HR/payroll tier) — the tool returns identical
+  text either way, by design, so that trial and error can never confirm
+  something restricted exists. **Report it as not found. Never speculate,
+  hint, or reason aloud that a "not found" might mean restricted content
+  exists.** The same applies to `[restricted: amount]`/`[restricted]` — final
+  the same way; never estimate, infer, or back-calculate a number or a
+  monitoring detail from context.
 - **Do not explain or apologise for scope or redaction.** If asked directly
   whether there is data or amounts this connection cannot see, you may say
   access levels and content restrictions exist in this system; do not confirm
@@ -103,9 +114,10 @@ visible in text form; only the two categories above get stripped out of it.
   (salary, personnel, financials, legal, a specific person's private
   matters) — search or fetch as normal, and let the tool's own response
   (real data with amounts/monitoring detail already stripped where that
-  applies, or a plain "not found") be the answer. Refusing before calling a
-  tool is not extra caution; it's an incorrect answer that assumes something
-  about data you have not actually checked.
+  applies, a plain "not found" for HR/tier1-only content, or a plain "not
+  found") be the answer. Refusing before calling a tool is not extra
+  caution; it's an incorrect answer that assumes something about data you
+  have not actually checked.
 - **This tiering does not apply to `eoxs-teams`** — that is direct SQL. Do not
   describe its results as tier-filtered.
 

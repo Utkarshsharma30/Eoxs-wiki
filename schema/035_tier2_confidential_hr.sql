@@ -1,0 +1,39 @@
+-- Splits the tier2_confidential bucket: HR-only content (payroll, salary,
+-- incentives, bonuses, onboarding, offboarding, penalisation/suspension,
+-- sensitive credentials such as account passwords) moves to a new, narrower
+-- level so it is visible to HR but no longer to the 'general' (internal
+-- team) identity, which currently shares tier2_confidential + tier2
+-- clearance with HR (see mcp_server/http_server.py IDENTITIES,
+-- mcp_server/server.py HR_CLEARANCE). Before this, the ONLY thing keeping
+-- this content out of general's responses was the query-time redaction
+-- layer stripping monetary_amounts/employee_activity_monitoring after the
+-- fact -- the row itself was already visible pre-redaction. This migration
+-- makes HR-only content structurally invisible to general, not just
+-- field-redacted; the existing redaction layer stays in place underneath
+-- as a fallback safety net for content that reaches general via
+-- tier2_confidential/tier2 rows that mention a dollar figure or similar for
+-- an unrelated (non-HR) reason.
+--
+--   tier1                 Raj's own personal data + repo_docs. FULL_CLEARANCE only.
+--   tier2_confidential_hr NEW. Employee-facing HR/financial content, judged
+--                         by actual substance, not keywords: payroll/salary/
+--                         compensation/incentive/bonus records or
+--                         discussions, onboarding/offboarding paperwork,
+--                         disciplinary action (penalisation, suspension,
+--                         termination-for-cause detail), and sensitive
+--                         credential material (account/system passwords,
+--                         access-recovery secrets). FULL_CLEARANCE + HR only.
+--   tier2_confidential    Company-confidential, unchanged definition minus
+--                         the HR slice carved out above (investor relations,
+--                         financial statements, vendor contracts, legal/
+--                         compliance, employee activity/performance
+--                         monitoring). FULL_CLEARANCE + HR_CLEARANCE +
+--                         GENERAL (internal team).
+--   tier2                 General, everyone.
+--
+-- Enforcement mechanism is unchanged (access_tier = ANY(caller's clearance
+-- list)) -- this migration only adds a label; see mcp_server/server.py's
+-- HR_CLEARANCE and mcp_server/http_server.py's IDENTITIES for the
+-- corresponding code change, and ingestion/reclassify_hr_tier.py for the
+-- one-time re-classification of existing rows into the new level.
+ALTER TYPE access_tier ADD VALUE IF NOT EXISTS 'tier2_confidential_hr' AFTER 'tier1';

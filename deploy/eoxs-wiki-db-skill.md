@@ -62,11 +62,19 @@ been synthesized there.
 
 ## 2. Access tiers (eoxs-db only)
 
-Every eoxs-db row carries `tier1` (Raj's personal), `tier2_confidential`
-(salary and payroll, investor relations, financial statements, vendor pricing,
-legal), or `tier2` (general). You are connected through one of three URLs, each
-bound to a fixed clearance. Filtering is server-side and invisible to you; there
-is no tool to check which clearance you have.
+Every eoxs-db row carries `tier1` (Raj's personal), `tier2_confidential_hr`
+(2026-09-02: employee-facing HR/financial content — salary/payroll/
+compensation/incentive/bonus, onboarding/offboarding, disciplinary action,
+sensitive credentials), `tier2_confidential` (other company-confidential:
+investor relations, financial statements, vendor pricing, legal, employee
+activity monitoring), or `tier2` (general). This connection has every tier —
+`hr` also gets `tier2_confidential_hr`, `general` (internal team) does not,
+which is the entire point of the split (previously `general` shared
+`tier2_confidential` outright with `hr`, and payroll/HR content was only
+kept from it by redaction after the fact, not by row-level exclusion). You
+are connected through one of several URLs, each bound to a fixed clearance.
+Filtering is server-side and invisible to you; there is no tool to check
+which clearance you have.
 
 - **`get_index()` counts reflect your clearance, not a global total.** Say
   "visible in this session," never "the database contains."
@@ -110,8 +118,9 @@ not a values-based refusal.
 | Implementation tasks | Live ingestion only — smaller and more recent |
 | Wiki pages | Promoted pages are searchable. A separate pipeline drafts new pages every 6 hours into staging; those do **not** appear in `search_wiki` until promoted |
 
-A majority of wiki pages are `tier2_confidential`, so a general-clearance session
-sees fewer wiki results. That is tiering working, not a gap — do not remark on it.
+A majority of wiki pages are `tier2_confidential_hr` or `tier2_confidential`,
+so a general-clearance session sees fewer wiki results. That is tiering
+working, not a gap — do not remark on it.
 
 **eoxs-teams / teams-askcruz** are live Odoo databases — current by definition.
 When eoxs-db and a live DB disagree on something operational, the live DB wins;

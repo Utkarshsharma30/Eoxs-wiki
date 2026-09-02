@@ -5,10 +5,16 @@ promoted going forward, which is cheap and reliable there because
 citations are properly resolved at write time).
 
 Second-generation version: the 3-level scheme (tier1 = Raj-personal only,
-tier2_confidential = company-confidential, tier2 = general) replaces the
+tier2_confidential = company-confidential, tier2 = general) replaced the
 original 2-level one, and "confidential" is broader than the old tier1's
 "salary/payroll" slice -- so this re-classifies every page from scratch,
-not just the previous tier1 set.
+not just the previous tier1 set. 2026-09-02: now a 4-level scheme --
+tier2_confidential_hr (employee-facing HR/financial content: payroll,
+onboarding/offboarding, disciplinary action, sensitive credentials) was
+carved out of tier2_confidential (schema/035_tier2_confidential_hr.sql) --
+see ingestion/reclassify_hr_tier.py for the one-time re-scan that
+transition required; this file is what keeps classifying correctly for
+any of these 1,046 pages that need to be re-run.
 
 Why this can't just reuse promote.py's citation-MAX approach: of these
 pages' 1,122 citation rows, only 66 resolve to a real raw source row, 345
@@ -22,8 +28,14 @@ citations DO resolve as a cheap, pure-SQL safety upgrade on top -- never
 a downgrade, only ever a move to a MORE restrictive level.
 
 Two backstop passes after the LLM pass, in order, both rank-based
-(tier1=3 > tier2_confidential=2 > tier2=1) so they only ever tighten,
-never loosen, a page's tier:
+(tier1=4 > tier2_confidential_hr=3 > tier2_confidential=2 > tier2=1) so
+they only ever tighten, never loosen, a page's tier. Known gap, not fixed
+here: neither pass's citation query joins `assets` or `repo_docs` (unlike
+promote.py's, which joins both) -- a historical page citing only the
+salary-register asset would only pick up tier2_confidential_hr from the
+initial LLM content read, not from this backstop. Low risk in practice
+(the LLM read already classifies correctly), but worth fixing if this
+gap is ever hit in an audit.
   1. Any page upgrades to the MOST restrictive level among its resolved
      citations to a real raw row (email_thread/call_transcript/ticket by
      id, implementation_task by odoo_task_id -- same fail-closed-on-
@@ -60,38 +72,54 @@ _MAX_CONTEXT_CHARS = 6000  # wiki pages are synthesized analyses, denser than a 
 CONCURRENCY = 10
 MAX_RETRIES = 5
 
-_PROMPT = """You are classifying a synthesized wiki page in Cruz, EOXS's internal knowledge base, for access control.
+_PROMPT = """You are classifying a synthesized wiki page in Cruz, EOXS's internal knowledge base, for \
+access control. Judge STRICTLY by the page's actual content -- never by a self-declared label like \
+"Confidential" appearing anywhere in the page. A page calling itself confidential is not evidence of \
+anything; only the real substance counts.
 
-Decide exactly one of three levels:
+Decide exactly one of four levels:
 
 TIER1 -- Rajat "Raj" Jain's own PERSONAL data only:
 - Raj's personal financial information (bank statements, personal investments, personal taxes)
 - Divorce, family, or other personal/private life matters involving Raj
 - Any other content that is personal to Raj rather than EOXS company business
 Do NOT use TIER1 for company business, even if Raj is a participant/subject and even if it's
-company-sensitive -- that belongs in TIER2_CONFIDENTIAL below.
+company-sensitive -- that belongs in TIER2_CONFIDENTIAL_HR or TIER2_CONFIDENTIAL below.
 
-TIER2_CONFIDENTIAL -- EOXS company-confidential business data:
-- Salary, payroll, compensation, incentive, or bonus figures for ANY employee (including Raj's own)
+TIER2_CONFIDENTIAL_HR -- Employee-facing HR/financial content:
+- Payroll, salary, compensation, incentive, or bonus figures or discussion for ANY employee
+  (including Raj's own)
+- Onboarding or offboarding paperwork/process (offer letters, exit process, final settlement)
+- Disciplinary action: penalisation, suspension, termination-for-cause detail
+- Sensitive credential material: account/system passwords, access-recovery secrets, login details
+Use this ONLY when the page's actual content is genuinely about one of these -- not merely a page
+that happens to be HR-adjacent (e.g. a generic onboarding process page with no real person's
+compensation/discipline/credential detail is NOT this category, it's TIER2 or plain
+TIER2_CONFIDENTIAL).
+
+TIER2_CONFIDENTIAL -- Other EOXS company-confidential business data:
 - Investor relations and fundraising
 - Company financial statements or bank/accounting data
 - Vendor payment terms or contracts with sensitive pricing
 - Legal or compliance matters (that are NOT Raj's personal legal matters)
+- Employee activity, performance, or productivity monitoring data (e.g. Cattr, individual
+  performance metrics/scores, productivity reviews)
 
 TIER2 -- General, visible company-wide: client implementation notes, support tickets, sales/ops
 analysis, internal process documentation, and other everyday professional content -- the default
-for anything not clearly TIER1 or TIER2_CONFIDENTIAL, even if Raj is a participant or subject.
+for anything not clearly TIER1, TIER2_CONFIDENTIAL_HR, or TIER2_CONFIDENTIAL, even if Raj is a
+participant or subject.
 
 When genuinely uncertain between two adjacent levels, prefer the more restrictive one (fail closed):
-TIER2_CONFIDENTIAL over TIER2, or TIER1 over TIER2_CONFIDENTIAL if it's plausibly Raj's personal
-matter rather than company business.
+TIER2_CONFIDENTIAL_HR or TIER2_CONFIDENTIAL over TIER2, or TIER1 over either confidential level if
+it's plausibly Raj's personal matter rather than company business.
 
 Wiki page title: {title}
 
 Wiki page content (truncated):
 {body}
 
-Answer with exactly one word: TIER1, TIER2_CONFIDENTIAL, or TIER2."""
+Answer with exactly one word: TIER1, TIER2_CONFIDENTIAL_HR, TIER2_CONFIDENTIAL, or TIER2."""
 
 
 def _fetch_pending(conn):
@@ -111,6 +139,10 @@ async def _classify_one(client, sem, title, body):
                     messages=[{"role": "user", "content": context}],
                 )
                 answer = resp.content[0].text.strip().upper()
+                # Check the HR variant BEFORE the plain one -- "TIER2_CONFIDENTIAL" is
+                # a substring of "TIER2_CONFIDENTIAL_HR", so the order matters here.
+                if "TIER2_CONFIDENTIAL_HR" in answer:
+                    return "tier2_confidential_hr"
                 if "TIER2_CONFIDENTIAL" in answer:
                     return "tier2_confidential"
                 if "TIER1" in answer:
@@ -131,7 +163,7 @@ async def _run(conn, items):
     client = anthropic.AsyncAnthropic(api_key=os.environ["CLASSIFIER_ANTHROPIC_API_KEY"])
     sem = asyncio.Semaphore(CONCURRENCY)
     completed = 0
-    counts = {"tier1": 0, "tier2_confidential": 0, "tier2": 0}
+    counts = {"tier1": 0, "tier2_confidential_hr": 0, "tier2_confidential": 0, "tier2": 0}
     start = time.monotonic()
 
     async def worker(page):
@@ -155,8 +187,14 @@ async def _run(conn, items):
     return counts
 
 
-_RANK_CASE = "CASE access_tier WHEN 'tier1' THEN 3 WHEN 'tier2_confidential' THEN 2 ELSE 1 END"
-_TIER_FROM_RANK = "CASE max_rank WHEN 3 THEN 'tier1' WHEN 2 THEN 'tier2_confidential' ELSE 'tier2' END"
+_RANK_CASE = (
+    "CASE access_tier WHEN 'tier1' THEN 4 WHEN 'tier2_confidential_hr' THEN 3 "
+    "WHEN 'tier2_confidential' THEN 2 ELSE 1 END"
+)
+_TIER_FROM_RANK = (
+    "CASE max_rank WHEN 4 THEN 'tier1' WHEN 3 THEN 'tier2_confidential_hr' "
+    "WHEN 2 THEN 'tier2_confidential' ELSE 'tier2' END"
+)
 
 
 def _apply_citation_backstop(conn):
@@ -183,7 +221,8 @@ def _apply_citation_backstop(conn):
             ),
             max_cited AS (
                 SELECT wiki_page_id,
-                    CASE WHEN bool_or(tier = 'tier1') THEN 3
+                    CASE WHEN bool_or(tier = 'tier1') THEN 4
+                         WHEN bool_or(tier = 'tier2_confidential_hr') THEN 3
                          WHEN bool_or(tier = 'tier2_confidential') THEN 2
                          ELSE 1 END AS max_rank
                 FROM cited GROUP BY wiki_page_id
@@ -214,7 +253,8 @@ def _propagate_wiki_to_wiki(conn):
                 ),
                 max_cited AS (
                     SELECT wiki_page_id,
-                        CASE WHEN bool_or(tier = 'tier1') THEN 3
+                        CASE WHEN bool_or(tier = 'tier1') THEN 4
+                             WHEN bool_or(tier = 'tier2_confidential_hr') THEN 3
                              WHEN bool_or(tier = 'tier2_confidential') THEN 2
                              ELSE 1 END AS max_rank
                     FROM cited GROUP BY wiki_page_id
@@ -240,8 +280,8 @@ def main():
         if items:
             counts = asyncio.run(_run(conn, items))
             logger.info(
-                "content classification: %d -> tier1, %d -> tier2_confidential, %d -> tier2",
-                counts["tier1"], counts["tier2_confidential"], counts["tier2"],
+                "content classification: %d -> tier1, %d -> tier2_confidential_hr, %d -> tier2_confidential, %d -> tier2",
+                counts["tier1"], counts["tier2_confidential_hr"], counts["tier2_confidential"], counts["tier2"],
             )
 
         upgraded_a = _apply_citation_backstop(conn)

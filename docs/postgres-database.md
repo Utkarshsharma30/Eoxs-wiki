@@ -44,6 +44,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 032 | `032_asset_change_log.sql` | `asset_change_log` — audit trail for `create_asset`/`update_asset` (the second and, per explicit instruction, last write-capable table in this server, alongside `employees`). See `docs/backend-server.md` §5.2. |
 | 033 | `033_assets_title_trgm.sql` | `idx_assets_title_trgm` — trigram index backing `search_assets`'s `similarity()`-ranked matching (`match_score` in its results). |
 | 034 | `034_repo_docs.sql` | `repo_docs` — this repository's own `docs/*.md` files, `ARCHITECTURE.md`, and a synthesized codebase-overview document, made queryable through MCP. Every row hardcoded `tier1` (Raj-only) at import time — unlike `assets`, not classified per-document, since the whole category is internal engineering/ops detail. Read-only: no write tools, no change-log table. See `docs/backend-server.md` §5 and `ingestion/import_repo_docs.py`. |
+| 035 | `035_tier2_confidential_hr.sql` | Adds `'tier2_confidential_hr'` to the enum — splits employee-facing HR/financial content (payroll, onboarding/offboarding, disciplinary action, sensitive credentials) out of `tier2_confidential`, so it's structurally invisible to `general` (internal team), not just redacted at query time. See `docs/backend-server.md` §5 and `ingestion/reclassify_hr_tier.py` for the one-time re-classification of existing rows. |
 
 ## 2. Every table, grouped logically
 
@@ -69,7 +70,9 @@ A sibling database, `eoxs_frontend_threads` (same Postgres instance, different l
 
 No `CHECK` constraints exist anywhere — `access_tier` is enforced purely as a Postgres **ENUM type**, not a check constraint.
 
-**`access_tier` enum**, exact values in ordinal order: `tier1`, `tier2_confidential`, `tier2`. (`tier2_confidential` sorts *before* `tier2` in ordinal position because it was added via `ALTER TYPE ... ADD VALUE 'tier2_confidential' AFTER 'tier1'` — don't rely on alphabetical/ordinal sort implying anything about restrictiveness.) `employees` does NOT have this column — access to it is gated entirely at the MCP-identity level (`full`/`hr` only), not by row-level tier.
+**`access_tier` enum**, exact values in ordinal order: `tier1`, `tier2_confidential_hr`, `tier2_confidential`, `tier2`. (Neither `tier2_confidential_hr` nor `tier2_confidential` sorts where its name would suggest alphabetically — both were added via `ALTER TYPE ... ADD VALUE '...' AFTER 'tier1'`, most-recent-first — don't rely on alphabetical/ordinal sort implying anything about restrictiveness.) `employees` does NOT have this column — access to it is gated entirely at the MCP-identity level (`full`/`hr` only), not by row-level tier.
+
+**`tier2_confidential_hr`** (added 2026-09-02, `035_tier2_confidential_hr.sql`) — employee-facing HR/financial content carved out of `tier2_confidential`: payroll/salary/compensation/incentive/bonus for any employee, onboarding/offboarding, disciplinary action (penalisation/suspension), sensitive credential material. Visible to `full`/`ayan`/`hr` only — `general` (internal team) lost this slice of what it could previously see at the row level (it used to share `tier2_confidential` outright with `hr`); see `docs/backend-server.md` §5. Classified the same way as every other tier — by real content, never by a document's own "Confidential" label (a misclassification of exactly that shape, an SOP tagged confidential purely by its own front-matter, was found and fixed the same day this tier was added).
 
 **`employee_status` enum**: `active`, `inactive`. Soft-delete only — `deactivate_employee` never issues a real `DELETE`, matching `implementation_tasks`' existing `mark_tasks_inactive()` pattern (see `docs/raw-ingestion.md` §3).
 
