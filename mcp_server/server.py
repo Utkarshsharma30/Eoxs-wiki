@@ -122,15 +122,25 @@ def search_wiki(query, clearance=FULL_CLEARANCE):
 
 
 def list_emails(account="all", month="", clearance=FULL_CLEARANCE):
-    sql = "SELECT id, source_account, gmail_thread_id, subject, message_count, source_file_path FROM email_threads WHERE access_tier::text = ANY(%s)"
+    """Ordered by the most recent entry in thread_dates (when the mail was
+    actually sent), NOT source_file_path -- that column is only ever set for
+    the legacy file-based import (see get_email's docstring), so sorting or
+    filtering on it silently hid every API-ingested thread (all current
+    Gmail/Zoho mail) behind the older, legacy-imported rows that still have
+    a path. Found 2026-09-02: list_emails looked "stuck" at mid-August even
+    though search_emails/get_email proved current data existed and was
+    already wiki-cited."""
+    sql = """SELECT id, source_account, gmail_thread_id, subject, message_count, source_file_path,
+                     (SELECT max(d) FROM unnest(thread_dates) d) AS last_message_at
+              FROM email_threads WHERE access_tier::text = ANY(%s)"""
     params = [clearance]
     if account != "all":
         sql += " AND source_account = %s"
         params.append(account)
     if month:
-        sql += " AND source_file_path LIKE %s"
-        params.append(f"%/{month}/%")
-    sql += " ORDER BY source_file_path DESC LIMIT 100"
+        sql += " AND EXISTS (SELECT 1 FROM unnest(thread_dates) d WHERE to_char(d, 'YYYY-MM') = %s)"
+        params.append(month)
+    sql += " ORDER BY last_message_at DESC NULLS LAST LIMIT 100"
     return db_query(sql, params)
 
 
