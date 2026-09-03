@@ -16,8 +16,25 @@ from mcp.types import Tool
 
 from mcp_server.db import query as db_query, query_one as db_query_one
 
+# Every other tiered tool in mcp_server/server.py defaults its `clearance`
+# kwarg to FULL_CLEARANCE (not None) precisely so a caller that never sets
+# it explicitly -- like wiki_ingestion/agent_mcp_server.py, which reuses
+# server.py's TOOLS dict unwrapped, with no functools.partial/clearance
+# binding of its own -- still gets a real access list instead of "no tiers
+# at all". These three functions defaulted to None instead, which made
+# `access_tier::text = ANY(NULL)` evaluate to NULL (never true) and
+# silently returned zero rows to that internal sub-agent for every one of
+# the 14 repo_docs rows, every cycle, since this module was added
+# 2026-08-26 -- confirmed live 2026-09-03 by re-running the repo_docs
+# ingestion batch and watching the sub-agent report all three tools
+# returning empty/not-found and correctly refuse to fabricate pages from
+# titles alone. The real http_server.py-backed MCP identities were never
+# affected (build_server() always binds a real clearance there), only this
+# internal synthesis path.
+FULL_CLEARANCE = ["tier1", "tier2_confidential_hr", "tier2_confidential", "tier2"]
 
-def list_repo_docs(doc_type="", clearance=None):
+
+def list_repo_docs(doc_type="", clearance=FULL_CLEARANCE):
     sql = "SELECT id, slug, title, doc_type, access_tier, updated_at FROM repo_docs WHERE access_tier::text = ANY(%s)"
     params = [clearance]
     if doc_type:
@@ -27,7 +44,7 @@ def list_repo_docs(doc_type="", clearance=None):
     return db_query(sql, params)
 
 
-def search_repo_docs(query, clearance=None):
+def search_repo_docs(query, clearance=FULL_CLEARANCE):
     """Trigram-similarity-ranked, same approach as search_assets -- a
     handful of long documents, not worth full-text-search machinery."""
     return db_query(
@@ -41,7 +58,7 @@ def search_repo_docs(query, clearance=None):
     )
 
 
-def get_repo_doc(identifier, clearance=None):
+def get_repo_doc(identifier, clearance=FULL_CLEARANCE):
     """identifier: the row's numeric id, or its slug (from list_repo_docs/
     search_repo_docs)."""
     if str(identifier).isdigit():
