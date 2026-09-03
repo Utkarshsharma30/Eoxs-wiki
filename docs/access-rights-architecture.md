@@ -17,9 +17,9 @@ with different risk profiles, deliberately not unified:
 |---|---|---|
 | What it protects | Company second-brain (emails, calls, wiki, tickets, employees, docs) | Personal/departmental saved chat threads |
 | Enforcement style | SQL filter + LLM redaction safety net | Pure access boundary, no content filtering |
-| Tiers | `tier1` / `tier2_confidential` / `tier2` (fixed 3-level scheme) | `tier1` (Raj, personal-exclusive) / department name (open-ended) |
+| Tiers | `tier1` / `tier2_confidential_hr` / `tier2_confidential` / `tier2` (4-level scheme, `tier2_confidential_hr` added 2026-09-02) | `tier1` (Raj, personal-exclusive) / department name (open-ended) |
 | Classification | LLM agent, runs on every new row | Static lookup table — no LLM, department is a known fact |
-| Identities | 5 fixed roles (`full`/`hr`/`general`/`intern`/`staging_qa`) | 1 per individual employee |
+| Identities | 6 fixed roles (`full`/`ayan`/`hr`/`general`/`intern`/`staging_qa`) | 1 per individual employee |
 | Audit log | `mcp_redaction_log` (only actual redaction events) | `save_failures` (only failed/refused writes) |
 
 ---
@@ -36,46 +36,55 @@ content depending on which secret URL made the call.
 
 ## 1.2 The tier model
 
-Every tiered row carries an `access_tier` **Postgres ENUM** column, three
-values, in this ordinal order (added incrementally, so ordinal position
-does *not* imply restrictiveness order — don't rely on `ORDER BY
-access_tier`):
+Every tiered row carries an `access_tier` **Postgres ENUM** column, four
+values as of 2026-09-02, in this ordinal order (added incrementally, so
+ordinal position does *not* imply restrictiveness order — don't rely on
+`ORDER BY access_tier`):
 
 ```sql
 CREATE TYPE access_tier AS ENUM ('tier1', 'tier2', 'tier2_confidential');
 -- tier2_confidential was inserted via
 --   ALTER TYPE access_tier ADD VALUE 'tier2_confidential' AFTER 'tier1';
 -- so it sorts between tier1 and tier2, not after both.
+-- 2026-09-02 (schema/035_tier2_confidential_hr.sql):
+--   ALTER TYPE access_tier ADD VALUE 'tier2_confidential_hr' AFTER 'tier1';
+-- carved out of tier2_confidential -- sorts between tier1 and
+-- tier2_confidential, i.e. current live order is:
+--   tier1, tier2_confidential_hr, tier2_confidential, tier2
 ```
 
 | Tier | Meaning | Who sees it |
 |---|---|---|
-| `tier1` | Raj's own personal data — personal finances, personal taxes, family/personal-life matters that are not company business | `full` only |
-| `tier2_confidential` | Company-confidential business data — salary/payroll/compensation for **any** employee, investor relations, financial statements, vendor contracts, legal/compliance, employee activity/performance/productivity monitoring (e.g. Cattr) | `full`, `hr`, `general` |
+| `tier1` | Raj's own personal data (personal finances, taxes, family/personal-life matters), plus (2026-08-26) this repository's own docs/architecture/codebase reference (`repo_docs` table) — internal engineering/ops detail with no reason to be visible past `full`/`ayan` | `full`, `ayan` only |
+| `tier2_confidential_hr` | **Added 2026-09-02.** Employee-facing HR/financial content, judged by actual substance not keywords: payroll/salary/compensation/incentive/bonus records, onboarding/offboarding paperwork, disciplinary action (penalisation, suspension, termination-for-cause detail), sensitive credential material (account/system passwords, access-recovery secrets). Carved out of `tier2_confidential` specifically so it's structurally invisible to `general`, not just redacted after the fact | `full`, `ayan`, `hr` |
+| `tier2_confidential` | Company-confidential business data, minus the HR slice above — investor relations, financial statements, vendor contracts, legal/compliance, employee activity/performance/productivity monitoring (e.g. Cattr) | `full`, `ayan`, `hr`, `general` |
 | `tier2` | General — everything else | Everyone |
 
 Tables carrying `access_tier`: `email_threads` (default `tier1`),
 `call_transcripts` (default `tier1`), `wiki_pages` (default `tier1`),
-`wiki_staging.wiki_pages` (default `tier1`), `tickets` (default `tier2`),
-`sales_orders` (default `tier2`), `implementation_tasks` (default
-`tier2`), `assets` (no default — must always be explicitly classified,
-see §1.6). `employees` and `list_clients`/`list_contacts` data have **no**
-`access_tier` column — they sit outside the tiered system entirely (see
-§1.8).
+`wiki_staging.wiki_pages` (default `tier1`), `repo_docs` (hardcoded
+`tier1` always, not per-document classified — see §1.6), `tickets`
+(default `tier2`), `sales_orders` (default `tier2`),
+`implementation_tasks` (default `tier2`), `assets` (no default — must
+always be explicitly classified, see §1.6). `employees` and
+`list_clients`/`list_contacts` data have **no** `access_tier` column —
+they sit outside the tiered system entirely (see §1.8).
 
-## 1.3 The 5 identities
+## 1.3 The 6 identities
 
-Each identity is a `(name, secret_env_var, clearance, extra_redact_categories, enable_employee_tools, asset_write_scope, database)` tuple, defined in `mcp_server/http_server.py`:
+Each identity is a `(name, secret_env_var, clearance, extra_redact_categories, enable_employee_tools, asset_write_scope, database)` tuple, defined in `mcp_server/http_server.py`. Four clearance constants as of 2026-09-02 (was three until the `tier2_confidential_hr` split — see §1.2):
 
 ```python
-FULL_CLEARANCE    = ["tier1", "tier2_confidential", "tier2"]
-HR_CLEARANCE      = ["tier2_confidential", "tier2"]
-GENERAL_CLEARANCE = ["tier2"]
+FULL_CLEARANCE          = ["tier1", "tier2_confidential_hr", "tier2_confidential", "tier2"]
+HR_CLEARANCE            = ["tier2_confidential_hr", "tier2_confidential", "tier2"]
+INTERNAL_TEAM_CLEARANCE = ["tier2_confidential", "tier2"]
+GENERAL_CLEARANCE       = ["tier2"]
 
 IDENTITIES = [
     ("full", MCP_URL_SECRET, FULL_CLEARANCE, (), True, "all", None),
+    ("ayan", MCP_AYAN_URL_SECRET, FULL_CLEARANCE, (), True, "all", None),
     ("hr", MCP_HR_URL_SECRET, HR_CLEARANCE, ("non_payroll_monetary_amounts",), True, {"eoxs-salary-details"}, None),
-    ("general", MCP_GENERAL_URL_SECRET, HR_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None, None),
+    ("general", MCP_GENERAL_URL_SECRET, INTERNAL_TEAM_CLEARANCE, ("monetary_amounts", "employee_activity_monitoring"), False, None, None),
     ("intern", MCP_INTERN_URL_SECRET, GENERAL_CLEARANCE, ("monetary_amounts",), False, None, None),
     ("staging_qa", MCP_STAGING_URL_SECRET, FULL_CLEARANCE, (), True, "all", "staging"),
 ]
@@ -83,23 +92,39 @@ IDENTITIES = [
 
 | Identity | Clearance | Extra content-based redaction | Employee tools | Asset writes | DB |
 |---|---|---|---|---|---|
-| `full` | tier1+tier2_confidential+tier2 | none | read+write | create+update, any doc | live |
-| `hr` | tier2_confidential+tier2 | non-payroll $ stripped (payroll visible) | read+write | update only, salary doc only | live |
-| `general` | tier2_confidential+tier2 | **every** $ stripped incl. payroll, + activity-monitoring data | none | none | live |
+| `full` | tier1+tier2_confidential_hr+tier2_confidential+tier2 | none | read+write | create+update, any doc | live |
+| `ayan` | tier1+tier2_confidential_hr+tier2_confidential+tier2 (identical to `full`) | none | read+write | create+update, any doc | live |
+| `hr` | tier2_confidential_hr+tier2_confidential+tier2 | non-payroll $ stripped (payroll visible) | read+write | update only, salary doc only | live |
+| `general` | tier2_confidential+tier2 (excludes the HR tier structurally) | **every** $ stripped incl. payroll, + activity-monitoring data | none | none | live |
 | `intern` | tier2 only | every $ stripped | none | none | live |
-| `staging_qa` | tier1+tier2_confidential+tier2 | none | read+write, unrestricted | unrestricted | **staging** (`eoxs_wiki_staging`) |
+| `staging_qa` | tier1+tier2_confidential_hr+tier2_confidential+tier2 | none | read+write, unrestricted | unrestricted | **staging** (`eoxs_wiki_staging`) |
 
-`general` was widened 2026-08-11 from tier2-only to the same DB-level
-clearance as `hr`, because most `tier2_confidential` pages carry one
-dollar figure alongside otherwise-relevant general content — losing the
-whole page over one number was worse than stripping just the number.
+`general` was widened 2026-08-11 from tier2-only to share `hr`'s full
+clearance list, because most `tier2_confidential` pages carry one dollar
+figure alongside otherwise-relevant general content — losing the whole
+page over one number was worse than stripping just the number. It was
+narrowed again 2026-09-02 with its own `INTERNAL_TEAM_CLEARANCE` constant
+that structurally excludes the new `tier2_confidential_hr` tier — before
+that split, HR/payroll content reaching `general` was kept out only by
+the redaction layer stripping it *after* the row was already visible
+pre-redaction; now it's invisible at the SQL layer, the redaction
+categories remain as a fallback for tier2_confidential/tier2 content that
+happens to mention money/monitoring data for an unrelated reason (e.g.
+client billing).
+
+`ayan` (added 2026-08-24) is a second full-clearance, write-capable
+identity, functionally identical to `full` in every permission respect —
+it exists purely so Ayan's own writes are tagged `changed_by='ayan'`
+rather than `changed_by='full'` in the audit logs, not because he needs
+different access than Raj.
 
 Tool counts: **23 read-only tools** for every identity (added
-`list_repo_docs`/`search_repo_docs`/`get_repo_doc` 2026-08-26, tier1-only —
-see `docs/backend-server.md` §5.5); `full`/`hr` also
-get 7 employee tools + 1–2 asset-write tools (**32 for `full`, 31 for
-`hr`**, since `hr` has no `create_asset`); `general`/`intern` stay at 23;
-`staging_qa` sees all 32, every one hitting staging.
+`list_repo_docs`/`search_repo_docs`/`get_repo_doc` 2026-08-26, tier1-only
+— see `docs/backend-server.md` §5.5); `full`/`ayan`/`hr` also get 7
+employee tools + 1–2 asset-write tools (**32 for `full`, 32 for `ayan`,
+31 for `hr`**, since `hr` has no `create_asset`); `general`/`intern` stay
+at 23; `staging_qa` sees all 29 non-`ayan` tools (unrestricted, like
+`full`), every one hitting staging.
 
 ## 1.4 How identity is enforced — URL secret, not login
 
@@ -141,7 +166,7 @@ binding in §1.4.
 `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`,
 `get_client_profile`, `get_client_file`, `list_implementation_tasks`,
 `search_implementation_tasks`, `get_implementation_task`,
-`list_repo_docs`, `search_repo_docs`, `get_repo_doc`. The 3
+`list_repo_docs`, `search_repo_docs`, `get_repo_doc`. The 2
 exceptions — `list_clients`, `list_contacts` — have no `access_tier`
 column on their underlying rows, so nothing to filter. A tool reaching a
 child row only through a parent that already carries `access_tier` (e.g.
@@ -149,6 +174,22 @@ child row only through a parent that already carries `access_tier` (e.g.
 the parent's tier, not its own column — "defense-in-depth pattern used
 everywhere a child row is only ever reachable through an already-checked
 parent."
+
+**Known gap, found and fixed 2026-09-03**: `list_repo_docs`/
+`search_repo_docs`/`get_repo_doc` (`mcp_server/repo_docs.py`) originally
+defaulted their `clearance` keyword to `None` instead of `FULL_CLEARANCE`
+like every other tool here. `build_server()`'s `functools.partial`
+binding (§1.4) always overrides this default for the real customer-facing
+server, so `full`/`ayan` were never actually affected through claude.ai —
+but `wiki_ingestion/agent_mcp_server.py` (the internal server the
+wiki-synthesis sub-agent connects to) reuses these functions unwrapped,
+with no clearance override at all, so it always got `clearance=None` →
+`access_tier::text = ANY(NULL)` → zero rows, silently, for all 14
+`repo_docs` rows, every cycle, since that table launched (2026-08-26). The
+practical effect: none of this repository's own reference docs were ever
+actually wiki-ingested, despite two batches (2026-08-28, 2026-09-02) both
+reporting success at the ingest stage. See `docs/backend-server.md` §5.7
+for the full incident writeup.
 
 ## 1.6 The classification agent(s) — assigning a tier to NEW content
 
@@ -173,17 +214,30 @@ at promotion time, as the **MAX (most restrictive) of every resolved
 citation's own tier**:
 
 ```sql
--- across all 4 real raw source types a citation can point to
+-- across all 6 real raw source types a citation can point to
 SELECT t.access_tier::text FROM wiki_citations wc JOIN email_threads t ON ...
 UNION SELECT ... FROM call_transcripts ...
 UNION SELECT ... FROM tickets ...
 UNION SELECT ... FROM implementation_tasks ...
+UNION SELECT ... FROM assets ...
+UNION SELECT ... FROM repo_docs ...
 ```
-then `tier1` if any citation is `tier1`, else `tier2_confidential` if any
+then, most-restrictive wins: `tier1` if any citation is `tier1`, else
+`tier2_confidential_hr` if any is that, else `tier2_confidential` if any
 is that, else `tier2`. Guarantees "a synthesized page can never leak a
-tier1 source by citing it from an otherwise-tier2 page" — reliable because
-the drafting agent can only cite a real, resolved raw row, never an
-"unresolved" placeholder.
+tier1 (or HR) source by citing it from an otherwise-lower-tier page" —
+reliable because the drafting agent can only cite a real, resolved raw
+row, never an "unresolved" placeholder. The `repo_docs` join was added
+2026-08-28 for the same reason the `assets` join was added earlier
+(2026-08-25) — its absence meant a page citing only `repo_docs` rows
+computed an empty `cited_tiers` set and defaulted to the least-restrictive
+`tier2`, which would have exposed internal engineering/infra detail
+(credentials layout, schema internals, redaction logic) to `hr`/
+`general`/`intern`. See `docs/backend-server.md` §5.7 for a related but
+separate bug found the same week: the join above was always correct, but
+the `repo_docs` *read tools* the synthesis sub-agent needs to actually
+draft a citeable page were broken until 2026-09-03, so this join had
+nothing to promote in practice until then.
 
 **Two standalone batch classifiers** (`ingestion/tier_classifier.py` for
 raw source tables, `wiki_ingestion/tier_classifier.py` for the ~1,046
@@ -403,7 +457,7 @@ without Raj's personal archive being visible to anyone else at all.
 
 ## 2.2 The tier model
 
-Simpler and open-ended compared to eoxs-wiki-db's fixed 3-level scheme —
+Simpler and open-ended compared to eoxs-wiki-db's fixed 4-level scheme —
 a plain text value, either:
 - `'tier1'` — Raj, personal, exclusive. Mirrors `eoxs-wiki-db`'s own
   `tier1` = "Raj personal" concept directly (same person, same idea,
@@ -488,7 +542,7 @@ if owner != username:
 
 ## 2.7 Identity — per-individual secret, not per-role
 
-Different from `eoxs-wiki-db`'s 5 fixed role-based secrets: each
+Different from `eoxs-wiki-db`'s 6 fixed role-based secrets: each
 **individual employee** gets their own secret, mapped 1:1 to a username.
 Originally implemented via a shared FastMCP instance + an ASGI middleware
 that scraped SSE handshake responses to map `session_id → username` in an
