@@ -116,6 +116,7 @@ def _invoke_once(url, prompt, timeout_seconds):
         proc = subprocess.run(
             [
                 "claude", "-p", prompt,
+                "--model", "claude-sonnet-5",
                 "--mcp-config", mcp_config_path,
                 "--strict-mcp-config",
                 "--disallowedTools", DISALLOWED_BUILTIN_TOOLS,
