@@ -98,6 +98,19 @@ def _build_mcp_config(url):
 
 
 def _invoke_once(url, prompt, timeout_seconds):
+    # `claude -p` treats ANTHROPIC_API_KEY (and, potentially, any other
+    # Anthropic-key-shaped env var) as an auth override that takes
+    # precedence over the deploy user's Claude Max OAuth login -- and
+    # since this whole service's env comes from a systemd EnvironmentFile
+    # shared with ingestion/spam_filter.py and ingestion/call_relevance.py
+    # (which legitimately need ANTHROPIC_API_KEY), an unscrubbed subprocess
+    # env silently billed every sub-agent session to the API key at
+    # Sonnet pricing instead of the flat subscription. Strip both known
+    # Anthropic keys so this always falls through to the OAuth login.
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("CLASSIFIER_ANTHROPIC_API_KEY", None)
+
     mcp_config_path = _build_mcp_config(url)
     try:
         proc = subprocess.run(
@@ -115,6 +128,7 @@ def _invoke_once(url, prompt, timeout_seconds):
             text=True,
             timeout=timeout_seconds,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
     finally:
         os.unlink(mcp_config_path)
@@ -141,6 +155,15 @@ def _parse_stream_json(stdout):
             event = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            # Surfaced to the journal so a billing regression (the
+            # ANTHROPIC_API_KEY-leak incident, 2026-09-04) shows up in
+            # every run's own log instead of requiring a manual repro.
+            # "none" is the expected value -- it means claude -p fell
+            # through to the deploy user's Claude Max OAuth login rather
+            # than an API key found in its (scrubbed, see _invoke_once)
+            # subprocess environment.
+            print(f"[headless_agent] apiKeySource={event.get('apiKeySource')} model={event.get('model')}", flush=True)
         if event.get("type") == "result":
             result_event = event
         elif event.get("type") == "assistant":
