@@ -52,6 +52,7 @@ from ingestion.fathom_fetcher import process_fathom
 from ingestion.odoo_fetcher import process_all as odoo_process_all
 from ingestion.ingest_log import log_run
 from ingestion.linear_report import start_sweep_parent, finish_sweep_parent, start_source_task, finish_source_task
+from ingestion.redaction_linear_report import report_new_redaction_events
 from ingestion.state import now_utc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -164,6 +165,15 @@ def run_full_sweep():
             summary[name] = {"error": str(e)}
         finish_source_task(task_issue_id, name, summary[name])
     finish_sweep_parent(parent_issue_id, summary, run_at)
+    # MCP query-time redaction activity (mcp_server/redaction.py,
+    # mcp_redaction_log) piggybacks on this same 2-hourly cadence, reported
+    # separately from the sweep parent above since it's a different kind of
+    # event (an MCP tool call, not a raw-ingestion fetch) -- never raises,
+    # a reporting failure here must never affect sweep results.
+    try:
+        report_new_redaction_events()
+    except Exception as e:
+        logger.warning("redaction Linear report failed (sweep unaffected): %s", e)
     return summary
 
 
