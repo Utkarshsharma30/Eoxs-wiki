@@ -25,7 +25,7 @@ wiki_ingestion/
   repair_stale_task_citations.py    127  One-off incident repair script
   staging_db.py                      29  Staging-schema DB connection helper
 ```
-3,946 lines total, 21 files (recomputed 2026-08-28). The list above is not exhaustive as of this count — `rerun_assets_manual.py` and `mcp_http_server.py` have been added since it was last written; see `git log --stat -- wiki_ingestion/` for the exact current file set.
+4,019 lines total, 22 files (recomputed 2026-09-07) — `rerun_assets_manual.py` and `mcp_http_server.py` are now folded into this count; see `git log --stat -- wiki_ingestion/` if this drifts again.
 
 ## 2. The phases, in order, exactly what each does
 
@@ -35,7 +35,7 @@ This pipeline is a strict sequential pipeline, not a loop of independent jobs. P
 
 **Repo-docs sync (added 2026-08-28, runs before detection):** `run_pipeline.py` calls `ingestion.import_repo_docs.import_all()` first, every cycle, wrapped in try/except so a bad doc file can never block real ingestion. Previously this only ran when someone remembered the manual `python -m ingestion.import_repo_docs` command — meaning an edit to `docs/*.md`/`ARCHITECTURE.md` had genuinely no automatic path into the wiki. Re-running it here is safe (pure upsert; unchanged content produces no new `updated_at`) and is what gives the `repo_docs` partition below anything to detect.
 
-**Detection** (`detect.py`, `run_detection(cycle_id)`): for each of the email accounts (`raj_gmail`, `ron_gmail`, `remya_gmail`, `support_zoho`), plus `tickets`, `calls`, `assets`, `repo_docs`, and one partition per client (`client_{slug}`):
+**Detection** (`detect.py`, `run_detection(cycle_id)`): for each account `email_accounts()` returns — **dynamic, not a fixed list**, since both Gmail and Zoho accounts are DB-backed (`oauth_accounts`) as of 2026-08; a newly self-serve-connected account shows up here automatically, no code change needed. Currently 7 accounts (`raj_gmail`, `ron_gmail`, `remya_gmail`, `isha_gmail`, `support_zoho`, `isha_zoho`, `ayan_zoho`), including ones with `raw_sweep_enabled=false` — harmless to keep scanning a source that just never produces new rows. Plus `tickets`, `calls`, `assets`, `repo_docs`, and one partition per client (`client_{slug}`):
 1. Reads a cursor from `sync_cursors` under key `wiki_ingest_{source_kind}` — a **separate cursor namespace** from raw-ingestion's own cursors on the very same `sync_cursors` table.
 2. Pulls candidate rows updated since that cursor.
 3. Computes a SHA-256 content hash per row (including its full child-table content — email body, ticket description+events, transcript segments, task description+events).
@@ -142,6 +142,14 @@ then: `tier1` if any citation is tier1, else `tier2_confidential` if any is that
 
 A **separate** classifier, `tier_classifier.py`, exists purely for the ~1,046 legacy pages imported before `promote.py` existed (whose citations are mostly unresolved, so the citation-max approach alone can't classify most of them). It runs an LLM content-classification pass first (fail-closed to `tier1` on error), then two SQL-only backstop passes that only ever *tighten* a tier, never loosen it: one upgrading from resolved raw citations, one propagating tier along wiki-page-cites-wiki-page links to a fixed point.
 
+### 4.1 Citations weren't just written, they went unread — the live MCP tools never queried `wiki_citations` at all (fixed 2026-09-08)
+
+Everything above describes citations from the *writing* side: `wiki_citations` (4,510 rows on live) has been populated correctly by ingestion since the table existed. But `mcp_server/server.py`'s customer-facing `search_wiki`/`get_wiki_page` — the only tools an actual MCP client (claude.ai, Claude Code) calls — never joined `wiki_citations` at all. A model could find exactly the right synthesized page and still have no structured way to reach the raw thread/call/asset it was drafted from; it would fall back to a fresh raw keyword search, discarding the whole point of having a cited answer already.
+
+Real case that surfaced this: a user asked for a specific email about a PS Data integration request. The correct wiki page existed (id 1945, cited to `email_thread:67695`), but the model checked raw `search_emails` twice (multi-word AND queries that returned `[]` since no single thread contained every term) before ever considering the wiki — and even if it had called `search_wiki` first under the old code, the result would have carried no citation data to act on.
+
+**Fixed**: `get_wiki_page` and `search_wiki` (`mcp_server/server.py`) now join `wiki_citations` and return a `citations` array per page, each entry resolved to `fetch_tool`/`fetch_identifier` — the exact raw-tool call to make (e.g. `get_email`/`67695`) — using the same per-`source_type` join logic as `promote.py`/`tier_classifier.py` above (`implementation_task` on `odoo_task_id`, others on `id`; `ticket`/`unresolved`/`wiki_page` left unresolvable). `search_wiki` also now returns each result's `id` (previously omitted), so a hit chains directly into `get_wiki_page` or a citations lookup without a second title search. All four content-bearing skill files were rewritten to make wiki-first retrieval a hard rule rather than advisory prose — see `docs/backend-server.md` §5.8 for the full incident writeup and the accompanying `search_emails`/`list_emails` raw-search fixes.
+
 ## 6. 2026-08 incident — real, root-caused, and fixed
 
 **Symptom**: for ~2 days (Aug 4–6), the pipeline ran on schedule every 6 hours, reported `status: done`, and correctly detected real new raw data every cycle — but produced **zero** new or updated `wiki_staging` pages, and the same 4 pages (ids 275–278, stuck in `draft` since cycle 13) got silently "re-reviewed" as `ok: true` across 8 consecutive cycles without ever actually being marked reviewed or rejected.
@@ -170,9 +178,9 @@ Phase 4/5 have no DB-side "running" bookkeeping row the way `wiki_ingest_cycles`
 
 `deploy/eoxs-wiki-pipeline.timer`: `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours. `deploy/eoxs-wiki-pipeline.service` sets `TimeoutStartSec=infinity` deliberately (a single batch can take 3–5+ minutes, a full run can span hours — systemd's default ~90s oneshot timeout would otherwise kill it mid-run). It now depends on `deploy/eoxs-wiki-mcp.service` (`After=`/`Wants=`) — the persistent HTTP MCP server every sub-agent invocation connects to (see §3, §6) must be up first. `eoxs-wiki-mcp.service` is `Restart=always`, matching `eoxs-mcp.service`'s pattern for the external connector.
 
-## 8. Current real pipeline state (as of 2026-08-25)
+## 8. Current real pipeline state (as of 2026-09-07)
 
-`wiki_staging.wiki_pages` status counts: **1,153 promoted**, **51 rejected**, **0 draft**, **0 reviewed**. Zero rows sitting in `draft` or `reviewed` is expected now, not a sign of a stall — see §2's Promotion section: a page clears `draft` → `reviewed` → `promoted` within the same review sweep, so those two intermediate states are normally empty between sweeps. Live `wiki_pages`: **1,866** total (50 tier1 / 1,096 tier2_confidential / 720 tier2). `wiki_ingest_cycles` has reached **98** total cycles.
+`wiki_staging.wiki_pages` status counts: **1,464 promoted**, **72 rejected**, **0 draft**, **0 reviewed**. Zero rows sitting in `draft` or `reviewed` is expected now, not a sign of a stall — see §2's Promotion section: a page clears `draft` → `reviewed` → `promoted` within the same review sweep, so those two intermediate states are normally empty between sweeps. Live `wiki_pages`: **2,063** total (71 tier1 / 499 tier2_confidential_hr / 489 tier2_confidential / 1,004 tier2 — a 4-way split since the 2026-09-02 HR-tier carve-out, see `docs/backend-server.md` §5). `wiki_ingest_cycles` has reached **143** total cycles.
 
 Treat any numeric snapshot in this section (including this one) as a point-in-time reading, not a maintained fact — it goes stale within days on a system this active. Query `wiki_staging.wiki_pages`/`public.wiki_pages`/`wiki_ingest_cycles` directly, or check the live "pending drafts" Linear board (`docs/linear-integration.md` §9), for the current numbers.
 

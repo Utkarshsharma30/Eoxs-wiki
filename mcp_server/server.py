@@ -107,6 +107,50 @@ def get_index(clearance=FULL_CLEARANCE):
     return {"totals": counts, "wiki_pages_by_type": by_type}
 
 
+# wiki_citations.source_type -> the raw table + join column used to resolve
+# a citation to a concrete row your other tools can fetch directly (get_email,
+# get_call, get_asset, get_repo_doc, get_implementation_task). Mirrors the
+# join logic already used by wiki_ingestion/promote.py and tier_classifier.py
+# -- implementation_task is the one exception, joined on odoo_task_id, never
+# the internal serial id, because that table gets fully refreshed every
+# raw-ingestion sweep (see get_implementation_task's docstring). 'ticket' is
+# a legacy value with no live table (tickets were removed from this system
+# 2026-08-10) -- left unresolvable on purpose. 'unresolved'/'unresolvable'/
+# 'wiki_page' are pre-existing junk/self-reference values from older
+# imports, also left unresolvable.
+CITATION_FETCH_HINTS = {
+    "email_thread": "get_email",
+    "call_transcript": "get_call",
+    "asset": "get_asset",
+    "repo_doc": "get_repo_doc",
+    "implementation_task": "get_implementation_task",
+}
+
+
+def _citations_for_page(page_id, clearance):
+    """Every raw source this wiki page cites, plus which tool+identifier to
+    call to fetch the actual record -- so a citation can be followed
+    directly instead of re-searching raw data blind. This is the piece that
+    was missing entirely before 2026-09-08: wiki_citations (4,510 rows) was
+    populated by ingestion but never read by any live-serving tool, so a
+    model that found the right wiki page still had no structured way to
+    jump to the exact source thread/call/asset it cited."""
+    rows = db_query(
+        "SELECT source_type, source_id, source_ref_raw FROM wiki_citations WHERE wiki_page_id = %s ORDER BY id",
+        (page_id,),
+    )
+    for row in rows:
+        source_type, source_id = row["source_type"], row["source_id"]
+        fetch_tool = CITATION_FETCH_HINTS.get(source_type)
+        if fetch_tool is None or source_id is None:
+            row["fetch_tool"] = None
+            row["fetch_identifier"] = None
+            continue
+        row["fetch_tool"] = fetch_tool
+        row["fetch_identifier"] = source_id
+    return rows
+
+
 def get_wiki_page(title, clearance=FULL_CLEARANCE):
     page = db_query_one(
         "SELECT * FROM wiki_pages WHERE title ILIKE %s AND access_tier::text = ANY(%s) ORDER BY updated_date DESC NULLS LAST LIMIT 1",
@@ -130,21 +174,30 @@ def get_wiki_page(title, clearance=FULL_CLEARANCE):
     page["flags"] = db_query(
         "SELECT flag_type, text FROM wiki_flags WHERE wiki_page_id = %s", (page["id"],)
     )
+    # citations: the raw sources this page was drafted from -- call
+    # `fetch_tool` with `fetch_identifier` to get the full raw record
+    # (e.g. get_email(66376)) instead of re-searching raw data.
+    page["citations"] = _citations_for_page(page["id"], clearance)
     return page
 
 
 def search_wiki(query, clearance=FULL_CLEARANCE):
-    return db_query(
-        """SELECT title, page_type, ts_headline('english', body, plainto_tsquery('english', %s)) AS snippet
+    # id included (previously omitted) so a hit can be chained straight into
+    # get_wiki_page or a citations lookup without a second title-based search.
+    results = db_query(
+        """SELECT id, title, page_type, ts_headline('english', body, plainto_tsquery('english', %s)) AS snippet
            FROM wiki_pages
            WHERE body_tsv @@ plainto_tsquery('english', %s) AND access_tier::text = ANY(%s)
            ORDER BY ts_rank(body_tsv, plainto_tsquery('english', %s)) DESC
            LIMIT 20""",
         (query, query, clearance, query),
     )
+    for row in results:
+        row["citations"] = _citations_for_page(row["id"], clearance)
+    return results
 
 
-def list_emails(account="all", month="", clearance=FULL_CLEARANCE):
+def list_emails(account="all", month="", date="", clearance=FULL_CLEARANCE):
     """Ordered by the most recent entry in thread_dates (when the mail was
     actually sent), NOT source_file_path -- that column is only ever set for
     the legacy file-based import (see get_email's docstring), so sorting or
@@ -152,7 +205,12 @@ def list_emails(account="all", month="", clearance=FULL_CLEARANCE):
     Gmail/Zoho mail) behind the older, legacy-imported rows that still have
     a path. Found 2026-09-02: list_emails looked "stuck" at mid-August even
     though search_emails/get_email proved current data existed and was
-    already wiki-cited."""
+    already wiki-cited.
+
+    date: optional 'YYYY-MM-DD' for day-level filtering (added 2026-09-08 --
+    previously only month granularity existed, so a query like "the email I
+    sent Aug 28" had no precise tool-level way to be answered; the caller
+    had to eyeball a whole month's list or guess)."""
     sql = """SELECT id, source_account, gmail_thread_id, subject, message_count, source_file_path,
                      (SELECT max(d) FROM unnest(thread_dates) d) AS last_message_at
               FROM email_threads WHERE access_tier::text = ANY(%s)"""
@@ -160,26 +218,67 @@ def list_emails(account="all", month="", clearance=FULL_CLEARANCE):
     if account != "all":
         sql += " AND source_account = %s"
         params.append(account)
-    if month:
+    if date:
+        sql += " AND EXISTS (SELECT 1 FROM unnest(thread_dates) d WHERE d::date = %s)"
+        params.append(date)
+    elif month:
         sql += " AND EXISTS (SELECT 1 FROM unnest(thread_dates) d WHERE to_char(d, 'YYYY-MM') = %s)"
         params.append(month)
     sql += " ORDER BY last_message_at DESC NULLS LAST LIMIT 100"
     return db_query(sql, params)
 
 
-def search_emails(query, account="all", clearance=FULL_CLEARANCE):
-    sql = """
-        SELECT DISTINCT t.id, t.source_account, t.subject, t.source_file_path,
-               ts_headline('english', m.body, plainto_tsquery('english', %s)) AS snippet
-        FROM email_threads t JOIN email_messages m ON m.thread_id = t.id
-        WHERE m.body_tsv @@ plainto_tsquery('english', %s) AND t.access_tier::text = ANY(%s)
+def _search_emails_query(tsquery_fn, query, account, clearance):
+    sql = f"""
+        SELECT id, source_account, subject, source_file_path, snippet, rank FROM (
+            SELECT DISTINCT ON (t.id) t.id, t.source_account, t.subject, t.source_file_path,
+                   ts_headline('english', m.body, q.tsq) AS snippet,
+                   GREATEST(ts_rank(m.body_tsv, q.tsq), ts_rank(to_tsvector('english', t.subject), q.tsq)) AS rank
+            FROM email_threads t
+            JOIN email_messages m ON m.thread_id = t.id
+            CROSS JOIN LATERAL (SELECT {tsquery_fn}('english', %s) AS tsq) q
+            WHERE (m.body_tsv @@ q.tsq OR to_tsvector('english', t.subject) @@ q.tsq)
+              AND t.access_tier::text = ANY(%s)
     """
-    params = [query, query, clearance]
+    params = [query, clearance]
     if account != "all":
         sql += " AND t.source_account = %s"
         params.append(account)
-    sql += " LIMIT 20"
+    sql += " ORDER BY t.id, rank DESC) ranked ORDER BY rank DESC LIMIT 20"
     return db_query(sql, params)
+
+
+def search_emails(query, account="all", clearance=FULL_CLEARANCE):
+    """Two-tier search (added 2026-09-08, replacing a single strict-AND
+    query): plainto_tsquery treats a multi-word query as an implicit AND of
+    every term, so a query naming several entities at once (e.g. "Tripp
+    Collier PS Data information") required all four words to co-occur in
+    one message body -- correctly returning [] when no thread happened to
+    contain every term, even though threads existed that were obviously the
+    right answer to a human (one had "PS Data" without "Collier", another
+    had "Collier"/"Tripp" repeatedly without "PS Data"). Real fix for that
+    class of query is wiki-first retrieval (search_wiki, which resolves
+    entities via synthesis+citations, not brute-force co-occurrence) -- this
+    two-tier fallback just makes raw keyword search itself less brittle when
+    it IS the right tool:
+      1. AND match (plainto_tsquery) against body OR subject, ranked by
+         ts_rank -- subject was previously never matched at all, only
+         selected for display, so a thread titled exactly right but not
+         restating the query in its body was invisible to search.
+      2. Only if (1) returns nothing: OR match (any term matches), built via
+         websearch_to_tsquery (tolerant of stray punctuation, unlike
+         to_tsquery which requires strict tsquery syntax) over the query
+         terms joined with " or " -- still ranked, so a multi-entity query
+         degrades to its best partial match instead of silently returning
+         zero results.
+    Previously also had no ORDER BY at all with a LIMIT 20 -- meaning a
+    real match could be silently dropped past the cutoff by arbitrary scan
+    order even when it WAS found. Both tiers now rank by ts_rank."""
+    results = _search_emails_query("plainto_tsquery", query, account, clearance)
+    if not results:
+        or_query = " or ".join(query.split())
+        results = _search_emails_query("websearch_to_tsquery", or_query, account, clearance)
+    return results
 
 
 def get_email(identifier, clearance=FULL_CLEARANCE):
@@ -596,20 +695,40 @@ def _tool_defs(enable_employee_tools=False, asset_write_scope=None):
         Tool(
             name="get_wiki_page",
             description="Return a specific wiki page by title or partial match, with a body preview (first "
-                        f"{BODY_PREVIEW_CHARS} chars, plus body_length/body_truncated), outbound links, and flags. "
+                        f"{BODY_PREVIEW_CHARS} chars, plus body_length/body_truncated), outbound links, flags, "
+                        "and citations (the raw sources this page was drafted from — each has fetch_tool/"
+                        "fetch_identifier, e.g. get_email/66376, to pull the exact source record directly). "
+                        "ALWAYS try this or search_wiki BEFORE a raw search_emails/search_calls/search_assets/"
+                        "search_implementation_tasks call — a synthesized page's citations point straight at "
+                        "the right raw thread/call/asset/task, avoiding a blind keyword search across all raw "
+                        "data. Fall back to raw search only when the wiki has nothing relevant. "
                         "Full body is large — this intentionally previews rather than dumping the whole page.",
             inputSchema={"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
         ),
         Tool(
             name="search_wiki",
-            description="Full-text search synthesized wiki pages (entities, concepts, analyses, overviews, sources, prospects).",
+            description="Full-text search synthesized wiki pages (entities, concepts, analyses, overviews, "
+                        "sources, prospects). Each result includes 'id' (chain into get_wiki_page or reuse "
+                        "directly) and 'citations' (raw sources this page cites, each with fetch_tool/"
+                        "fetch_identifier — e.g. get_email/66376 — to pull the exact record). "
+                        "THE FIRST TOOL TO TRY for almost any content question, including ones that sound like "
+                        "raw-source lookups (\"find the email about X\", \"what did we discuss on the call "
+                        "about Y\") — a wiki page's citations resolve entity/topic queries far more reliably "
+                        "than full-text keyword search against raw emails/calls/tasks, which can miss the "
+                        "right thread entirely if it doesn't happen to contain every query word. Only fall "
+                        "back to search_emails/search_calls/search_assets/search_implementation_tasks directly "
+                        "when this returns nothing relevant.",
             inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
         ),
         Tool(
             name="list_emails",
-            description="List email threads. account: 'all'|'raj_gmail'|'ron_gmail'|'remya_gmail'|'support_zoho'. month: 'YYYY-MM' or empty.",
+            description="List email threads. account: 'all'|'raj_gmail'|'ron_gmail'|'remya_gmail'|'support_zoho'. "
+                        "date: 'YYYY-MM-DD' for a specific day, month: 'YYYY-MM' for a whole month (date takes "
+                        "precedence if both given), or leave both empty for the most recent 100 threads. "
+                        "Try search_wiki first if the query names a topic/person/company rather than just a date.",
             inputSchema={"type": "object", "properties": {
-                "account": {"type": "string", "default": "all"}, "month": {"type": "string", "default": ""}}},
+                "account": {"type": "string", "default": "all"}, "month": {"type": "string", "default": ""},
+                "date": {"type": "string", "default": ""}}},
         ),
         Tool(
             name="search_emails",

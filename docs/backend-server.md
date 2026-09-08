@@ -8,7 +8,20 @@ One VPS: hostname `ubuntu-4gb-sin-1`, reachable at bare IP `5.223.44.95` — **n
 
 ## 2. What's running here, service by service
 
-All app-level systemd units live in `deploy/` in the repo (installed as `/etc/systemd/system/*`). Every unit sets `User=deploy`, `Group=deploy`, `WorkingDirectory=/home/deploy/eoxs-wiki-db`, `EnvironmentFile=/home/deploy/eoxs-wiki-db/.env`, and logs to journald (`StandardOutput=journal`, distinct `SyslogIdentifier` per unit — there are no separate log files; `journalctl -u <unit>` is the only place to look).
+All app-level systemd units live in `deploy/` in the repo (installed as `/etc/systemd/system/*`). Every unit sets `User=deploy`, `Group=deploy`, `WorkingDirectory=/home/deploy/eoxs-wiki-db`, and logs to journald (`StandardOutput=journal`, distinct `SyslogIdentifier` per unit — there are no separate log files; `journalctl -u <unit>` is the only place to look).
+
+**Per-service scoped env files (2026-09-04), not one shared `.env`**: every unit used to read the same `EnvironmentFile=/home/deploy/eoxs-wiki-db/.env`, meaning e.g. the MCP server's process environment carried every Gmail/Zoho/Odoo/Linear credential it never uses, and — the real motivating incident, see §7 — the wiki-pipeline's `claude -p` subprocess inherited `ANTHROPIC_API_KEY` purely because it was present service-wide. Each unit now gets its own minimal `.env.<service>` file, containing only the variables that service actually reads:
+
+| Unit | Env file | Contains |
+|---|---|---|
+| `eoxs-ingestion.service`, `eoxs-sweep.service` | `.env.ingestion` | Postgres + every raw-source credential (Gmail/Zoho/OAuth, Fireflies, Fathom) + `ANTHROPIC_API_KEY`/`CLASSIFIER_ANTHROPIC_API_KEY` + Linear |
+| `eoxs-mcp.service` | `.env.mcp` | Postgres + `CLASSIFIER_ANTHROPIC_API_KEY` (redaction) + all 6 `MCP_*_URL_SECRET` values — no Gmail/Zoho/Odoo/Linear credentials at all |
+| `eoxs-wiki-mcp.service` | `.env.wiki-mcp` | Postgres only |
+| `eoxs-wiki-pipeline.service` | `.env.wiki-pipeline` | Postgres + Linear (no Anthropic API keys — see §7's incident; the `claude -p` subprocess env is scrubbed further still, at the Python level, not just by what's in this file) |
+| `pgweb.service` | `.env.pgweb` | `PGWEB_DB_PASSWORD`, `PGWEB_HTTP_PASSWORD` |
+| `pgweb-staging.service` | `.env.pgweb-staging` | same shape as above, staging-scoped |
+
+`.env` itself still exists (used by local/manual script invocations, e.g. running a fetcher by hand from a shell) but is no longer what any systemd unit reads. This is real secret-scoping, not just an organizational tidy-up — the MCP server process, for example, can no longer read a single raw-ingestion source credential even if a bug tried to.
 
 | Unit | Type | What it runs | Cadence |
 |---|---|---|---|
@@ -19,6 +32,8 @@ All app-level systemd units live in `deploy/` in the repo (installed as `/etc/sy
 | `eoxs-sweep.timer` | timer | triggers the above | `OnCalendar=00/2:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 2 hours, ±2min jitter, catches up after a reboot |
 | `eoxs-wiki-pipeline.service` | oneshot, `TimeoutStartSec=infinity` | `python3 -m wiki_ingestion.run_pipeline` | triggered by its timer |
 | `eoxs-wiki-pipeline.timer` | timer | triggers the above | `OnCalendar=00/6:00:00`, `RandomizedDelaySec=120`, `Persistent=true` — every 6 hours |
+| `eoxs-healthcheck.service` | oneshot, `User=root` | `deploy/healthcheck.sh` | triggered by its timer |
+| `eoxs-healthcheck.timer` | timer | triggers the above | `OnCalendar=hourly`, `RandomizedDelaySec=300`, `Persistent=true` — see §2.1 |
 | `pgweb.service` | simple, `Restart=always` | `pgweb --bind=127.0.0.1 --listen=8092 --url=postgres://eoxs_readonly@localhost:5432/eoxs_wiki --readonly --lock-session --auth-user=dbadmin ...` | always-on |
 | `pgweb-staging.service` | simple, `Restart=always` | same as above, port **8095**, `--url=...@localhost:5432/eoxs_wiki_staging` | always-on, added 2026-08-14 |
 | `nginx.service` | system-provided | reverse proxy (see §4) | always-on |
@@ -27,9 +42,21 @@ A sibling system, `eoxssecondbrain/eoxs-frontend-threads` (a separate repo, its 
 
 `eoxs-wiki-pipeline.service`'s `TimeoutStartSec=infinity` is deliberate — it runs sequential `claude -p` sub-agent calls that can take 3–5+ minutes per batch and hours for a full run, which would otherwise hit systemd's default ~90s oneshot timeout and get killed mid-run.
 
+### 2.1 `eoxs-healthcheck.service` (2026-09-05) — catching failures uptime monitoring can't see
+
+Added directly in response to two real incidents that plain "is the box up" monitoring would have missed entirely: the wiki-pipeline ran and failed on every single cycle for a full day with nothing alerting (the `claude` CLI binary was present but not logged in — the box, nginx, and every systemd unit's own exit code looked completely healthy the whole time), and separately a sweep source hit a per-account error that got caught and logged inside the summary but never failed the unit itself, so `systemctl` reported success while a mailbox silently stopped ingesting.
+
+`deploy/healthcheck.sh` (installed as `eoxs-healthcheck.service`/`.timer`, hourly, `RandomizedDelaySec=300`) checks four things a bare uptime check cannot:
+1. **Did each scheduled job run recently enough?** — `eoxs-sweep`'s and `eoxs-wiki-pipeline`'s last `ExecMainStartTimestamp` against a max age roughly 2x each timer's own cadence (5h / 13h), so ordinary `RandomizedDelaySec` jitter never trips a false alarm. A disabled timer is reported as a note, not a failure — some cut-over scenarios disable a timer deliberately, and alerting on that would train people to ignore the script.
+2. **Did the last run actually succeed?** — `systemctl is-failed` on each service.
+3. **Per-source errors that don't fail the unit** — greps the last 6 hours of `eoxs-sweep.service`'s journal for the `{'error': ...}` shape a caught-but-logged per-source fetcher exception leaves behind (see `ingestion/server.py`'s `run_full_sweep()`), since the unit itself still exits 0 in that case.
+4. **The always-on services are actually active** — `eoxs-ingestion`, `eoxs-mcp`, `eoxs-wiki-mcp`, `eoxs-frontend-threads`, `nginx`, `postgresql`.
+
+Exit 0 = healthy, 1 = a problem (with what, printed). An optional `HEALTHCHECK_PING_URL` (Healthchecks.io or equivalent, set in `/etc/eoxs-healthcheck.env`, not tracked in the repo) gets pinged only on a healthy run — the dead-man's-switch half, catching "the whole box is gone," which nothing running *on* the box can ever detect about itself. A failing run deliberately does not ping, so silence itself is the alert.
+
 **Known secret-hygiene issue**: the `pgweb.service` unit interpolates `${PGWEB_DB_PASSWORD}` and `${PGWEB_HTTP_PASSWORD}` directly into its `ExecStart=` command line. That means both secrets are visible in plaintext to anyone able to run `systemctl status pgweb` or `ps` as *any* local user, not just root. Worth fixing (e.g. wrap the actual pgweb invocation in a small shell script that reads the env vars internally instead of interpolating them into the unit file) — flagged here rather than silently left for the next person to discover the hard way.
 
-## 3. The Ingestion Server (`ingestion/server.py`, 261 lines)
+## 3. The Ingestion Server (`ingestion/server.py`, 324 lines)
 
 FastAPI app, `title="eoxs-wiki-db Raw Ingestion Server"`. Port: `INGESTION_SERVER_PORT` env var (default **8090**), binds `0.0.0.0` — reachable only via nginx's reverse proxy in practice (see §4), not directly from the internet.
 
@@ -41,11 +68,13 @@ Routes:
 | `POST /webhook/gmail` | Gmail Pub/Sub push (`{emailAddress, historyId}` base64 envelope) — refetches **all 3** Gmail accounts in the background, always returns 200 immediately | none (URL itself is the secret) |
 | `POST /webhook/fireflies` | Fireflies `transcript.completed` webhook | HMAC-SHA256 via `FIREFLIES_WEBHOOK_SECRET`, checked only if the var is set |
 | `POST /webhook/fathom` | Fathom `recording.completed` webhook | Svix-style HMAC via `FATHOM_WEBHOOK_SECRET`, checked only if the var is set |
-| `POST /trigger/manual` | Manual full sweep across all 7 sources; the only trigger path that reports to Linear | Bearer token against `INGESTION_WEBHOOK_SECRET`, if set |
+| `POST /trigger/manual` | Manual full sweep across `run_full_sweep()`'s current 4-source list (Gmail, Zoho, Fireflies, Fathom); the only trigger path that reports to Linear | Bearer token against `INGESTION_WEBHOOK_SECRET`, if set |
 
 A module-level `asyncio.Lock` (`_sweep_lock`) ensures only one run executes at a time — a duplicate trigger while one is in-flight is logged and dropped, not queued.
 
-Zoho and Odoo (tickets, invoices, all per-client implementation boards) have **no webhook path at all** — they're only ever picked up by the 2-hourly sweep. See `docs/raw-ingestion.md` for the full per-source breakdown.
+`run_full_sweep()`'s source list is 4, not 7 — the per-client Odoo implementation-board fetch, tickets, and invoices were each deliberately removed from it (2026-08-10/2026-08-12, see `docs/raw-ingestion.md` §2/§8), leaving only Gmail/Zoho/Fireflies/Fathom as ongoing, on-schedule sources. Zoho has **no webhook path at all** — it's only ever picked up by the 2-hourly sweep. See `docs/raw-ingestion.md` for the full per-source breakdown.
+
+Also piggybacking on the same 2-hourly sweep call (not a separate trigger): `ingestion/redaction_linear_report.py`'s `report_new_redaction_events()` reports any new `mcp_redaction_log` rows (MCP query-time redaction events, §5.4/below) to Linear as a parent+child issue set — see `docs/linear-integration.md` §4a.
 
 The actual production sweep entrypoint is `python -m ingestion.server --sweep` (the argparse branch, run directly by `eoxs-sweep.timer`) — not the HTTP `/trigger/manual` route.
 
@@ -176,6 +205,16 @@ Fixed by defaulting all three functions to `FULL_CLEARANCE` (mirroring every oth
 
 **Lesson for auditing this system**: a "no recent data" finding from a single list/search tool is not proof of an ingestion gap — cross-check with a second tool (or a direct query) before concluding the pipeline is broken, since a read-path bug and a real ingestion gap look identical from one tool's output alone.
 
+### 5.8 Wiki-first retrieval + citation-hopping (2026-09-08) — `wiki_citations` (4,510 rows) was populated by ingestion but never read by any live-serving tool
+
+**Real incident that surfaced this**: a user asked to pull up a specific email about a PS Data integration request. A wiki page (id 1945, "Raj Requests PS Data CSX API Access via Tripp Collier", correctly cited to `email_thread:67695`) already existed and was the exact right answer — but the calling model never checked the wiki. It called `search_emails` twice with multi-word queries (implicit-AND full-text search, so a query naming several entities returned `[]` the moment no single thread contained every word), then `list_emails` with the wrong month range, and never found the thread. Two separate gaps, both fixed together:
+
+**Gap 1 — `search_wiki`/`get_wiki_page` never read `wiki_citations` at all.** Even when a model *did* check the wiki and got a hit, the response carried no way to jump to the exact raw record the page was drafted from — only `title`/`page_type`/`snippet` (search_wiki) or the page body plus `wiki_links`/`wiki_flags` (get_wiki_page), never citations. A caller had to re-search raw data blind to "verify" or get full text, defeating the point of having a synthesized, cited answer. Fixed: both tools now join `wiki_citations` and return a `citations` array, each entry carrying `fetch_tool`/`fetch_identifier` (e.g. `{"source_type": "email_thread", "source_id": 67695, "fetch_tool": "get_email", "fetch_identifier": 67695}`) so a citation resolves straight into the right raw-tool call. Mirrors the per-`source_type` join logic already used by `wiki_ingestion/promote.py`/`tier_classifier.py` — `email_thread`/`call_transcript`/`asset`/`repo_doc` join on the raw table's `id`, `implementation_task` joins on `odoo_task_id` instead (that table gets fully refreshed every raw-ingestion sweep, so its serial `id` isn't stable — see `get_implementation_task`'s docstring), and legacy junk values (`ticket` — dead, no live table since 2026-08-10; `unresolved`/`wiki_page` — pre-existing non-raw citation types) resolve to `fetch_tool: null` rather than erroring. `search_wiki` also previously never returned the page `id` at all — added, so a hit can chain into `get_wiki_page` or a fresh citations lookup without a second title-based search.
+
+**Gap 2 — nothing enforced wiki-first ordering, and the skill files actively contradicted each other on it.** One line said `search_wiki` was "a genuine shortcut... do not skip past it by reflex" (soft, advisory); a few paragraphs later the decision tree's "A person" branch routed straight to `search_emails` with no mention of `search_wiki` at all — and every other content-shaped branch had the same gap. All 4 content-bearing skill files (`eoxs-wiki-db-skill.md`, `-general.md`, `-hr.md`, `-intern.md` — byte-identical passages in each, `staging_qa` defers to `full` so needed no separate edit) rewritten so wiki-first is a hard rule: `search_wiki`/`get_wiki_page` before any raw `search_*`/`list_*` call, every time, including for queries that sound raw-source-shaped ("find the email about X") — raw tools are the fallback for when the wiki has nothing relevant, not the first move.
+
+**Also fixed alongside, since they compound the same failure mode when the wiki genuinely has no page yet**: `search_emails` was a single strict-AND `plainto_tsquery` against message bodies only (subject never matched at all, just selected for display), with no `ORDER BY`/`ts_rank` under a `LIMIT 20` — a real match could be silently dropped past the cutoff by arbitrary scan order even when found. Now two-tier: ranked AND-match against body-or-subject first, falling back to a ranked OR-match (`websearch_to_tsquery` over the query terms joined with `" or "`) only if the AND tier returns nothing — so a multi-entity query degrades to its best partial match instead of returning `[]`. `list_emails` gained a `date` parameter (`'YYYY-MM-DD'`, taking precedence over `month` when both are given) — previously only month-granularity filtering existed, so a query for a specific day had no precise tool-level answer.
+
 One-off import: `loaders/import_employees_from_xlsx.py` merges EOXS's multi-sheet HR spreadsheet into one canonical row per person (deduped by name, then by shared email — catches same-person/different-spelling cases like "Dhrup" vs "Dhrup Kumar"). Deliberately excludes LinkedIn URLs, personal phone numbers, and — most importantly — a plaintext-password column present in the source sheet, never imported regardless of how this table gets used later.
 
 One more `Server` instance (`server.py`'s module-level `server = build_server(FULL_CLEARANCE, enable_employee_tools=True, identity_name="full", asset_write_scope="all")`) exists purely for local stdio transport — always full clearance and live database, on the reasoning that anyone able to run this file locally already has raw `.env` Postgres credentials anyway. Not one of the five HTTP identities above — a separate, sixth `Server` object, for a different transport entirely.
@@ -189,7 +228,7 @@ One more `Server` instance (`server.py`'s module-level `server = build_server(FU
 **Tool count: 23** tiered/read-only tools, present for every identity:
 `get_index`, `get_wiki_page`, `search_wiki`, `list_emails`, `search_emails`, `get_email`, `get_attachment_text`, `list_calls`, `search_calls`, `get_call`, `list_assets`, `search_assets`, `get_asset`, `list_clients`, `list_contacts`, `get_client_profile`, `get_client_file`, `list_implementation_tasks`, `search_implementation_tasks`, `get_implementation_task`, `list_repo_docs`, `search_repo_docs`, `get_repo_doc`.
 (`list_assets`/`search_assets`/`get_asset` added 2026-08-12 alongside the new `assets` table — see `docs/raw-ingestion.md` §2 Assets. `get_asset` returns the full raw document; the corresponding wiki page under `wiki/sources/assets/` is a synthesized summary, not a substitute for the original text. `list_repo_docs`/`search_repo_docs`/`get_repo_doc` added 2026-08-26 alongside the new `repo_docs` table, §5.5 below — every row is hardcoded `tier1`, so these three tools are present on every identity's tool list but only ever return non-empty results for `full`/`ayan` in practice; `hr`/`general`/`intern`/`staging_qa` get an empty list/error just like calling any other tier1-only tool with insufficient clearance, not a separate code path.)
-Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`ayan`/`hr` — **32 tools total** for `full` (23 + 7 + 2), **32** for `ayan` (identical tool set to `full`, distinguished only by its `changed_by` attribution, see §5's identity table), **31** for `hr` (23 + 7 + 1, no `create_asset`), still **23** for `general`/`intern`. `staging_qa` (§5.3) also sees **29** (unrestricted, like `full`) but every one of them targets `eoxs_wiki_staging`, not live.
+Plus **7 employee-directory tools** (§5.1) and **1–2 asset-write tools** (§5.2), present only for `full`/`ayan`/`hr`/`staging_qa` — **32 tools total** for `full` (23 + 7 + 2), **32** for `ayan` (identical tool set to `full`, distinguished only by its `changed_by` attribution, see §5's identity table), **31** for `hr` (23 + 7 + 1, no `create_asset`), still **23** for `general`/`intern`. `staging_qa` (§5.3) also sees **32** (unrestricted, like `full` — same 23 read + 7 employee + 2 asset-write tool set) but every one of them targets `eoxs_wiki_staging`, not live.
 
 `get_ticket`/`search_tickets`/`get_invoice`/`search_invoices` were **removed entirely** (2026-08-10) — support tickets and invoices/sales-orders are no longer part of this system's tool surface at all; that data now lives only in the separate `eoxs-teams` Odoo connector. The underlying `tickets`/`sales_orders`/`invoices` tables still exist in the schema (historical rows were deleted, not the tables themselves) — see `docs/postgres-database.md` and the known gap noted in `docs/raw-ingestion.md` §12.
 
@@ -217,19 +256,23 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 60 packages total resolve inside `.venv` once transitive dependencies (starlette, pydantic 2.x, the grpc/protobuf stack for pubsub, cryptography, jsonschema, etc.) are included.
 
-## 7. Total code size (current, `wc -l`)
+## 7. Total code size (current, `wc -l`, recomputed 2026-09-07)
 
 | Directory | Lines |
 |---|---|
-| `ingestion/` | 4,064 (23 files) |
-| `mcp_server/` | 822 |
-| `wiki_ingestion/` | 3,079 |
-| `loaders/` | 1,188 |
+| `ingestion/` | 6,479 (36 files) |
+| `mcp_server/` | 2,155 (includes `redaction.py`, `employees.py`, `asset_writes.py`, `repo_docs.py`) |
+| `wiki_ingestion/` | 4,019 (22 files) |
+| `loaders/` | 1,564 |
 | `parsers/` | 365 |
-| **Total (Python)** | **9,518** |
-| `schema/` (SQL, not counted above) | 846 lines across 22 numbered migrations |
+| **Total (Python)** | **14,582** |
+| `schema/` (SQL, not counted above) | 1,159 lines across 36 numbered migrations |
+
+Treat this table as a point-in-time snapshot, not a maintained fact — see `docs/raw-ingestion.md` §1 and `docs/wiki-ingestion.md` §1 for the per-directory file lists (both already note they go stale between updates; re-run `wc -l` rather than trusting an old number here).
 
 ## 8. Environment variables (names only — never commit or share actual values)
+
+Since 2026-09-04 (§2) these are split across per-service `.env.<service>` files rather than one shared `.env` — the groupings below double as which file actually carries which variable; see §2's table for the unit→file mapping. `.env` itself (no suffix) still exists for local/manual script use.
 
 **Ingestion server / webhooks:** `INGESTION_SERVER_PORT`, `INGESTION_WEBHOOK_SECRET`, `FIREFLIES_WEBHOOK_SECRET`, `FATHOM_WEBHOOK_SECRET`
 
@@ -239,9 +282,9 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 **Anthropic:** `ANTHROPIC_API_KEY` (spam/relevance filters), `CLASSIFIER_ANTHROPIC_API_KEY` (tier classification — deliberately separate for independent cost tracking)
 
-**Gmail** (one OAuth triplet per account): `RAJ_GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN`, `RON_GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN`, `REMYA_GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN`
+**Gmail**: two registered OAuth clients now, not one triplet per account — `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET` (the legacy Desktop-app client `raj_gmail`/`ron_gmail`/`remya_gmail` originally used) and `GMAIL_OAUTH_WEB_CLIENT_ID`/`GMAIL_OAUTH_WEB_CLIENT_SECRET` (the Web-app client every self-serve-connected account, including `ron_gmail` after it was reconnected, refreshes against). Legacy per-account triplets (`RAJ_/RON_/REMYA_GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN`) still exist in `.env.ingestion` but are superseded — actual refresh tokens live in the `oauth_accounts` table (`docs/raw-ingestion.md` §2 Gmail), not read from these env vars anymore. Also `OAUTH_REDIRECT_BASE_URL` (shared with Zoho's callback).
 
-**Zoho:** `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`
+**Zoho**: same shape — `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET` (legacy client, `support_zoho`) and `ZOHO_WEB_CLIENT_ID`/`ZOHO_WEB_CLIENT_SECRET` (self-serve-connected accounts). `ZOHO_REFRESH_TOKEN` is likewise superseded by the DB-backed `oauth_accounts` row.
 
 **Fireflies / Fathom:** `FIREFLIES_API_KEY`, `RON_FATHOM_API_KEY`
 
@@ -255,4 +298,4 @@ Python **3.12.3** (system interpreter and `.venv` match).
 
 ## 9. Where this fits in the overall system
 
-The backend server is the one physical machine everything else in this document set lives on: it hosts the database (`docs/postgres-database.md`), runs the raw-ingestion fetchers and their schedule (`docs/raw-ingestion.md`), runs the wiki-synthesis pipeline (`docs/wiki-ingestion.md`), and is where the Linear-reporting code executes from (`docs/linear-integration.md`). It also hosts the sibling `eoxs-frontend-threads` system (§2) and a Claude Code CLI / Codex CLI environment used directly for admin and development work (including a persistent `claude --teleport` session) — a real, load-bearing use of this being a full VPS, not just a place to run services, and the main reason a migration to a pure container-platform (see the DigitalOcean migration roadmap) can't simply move everything off it. Nothing in this system runs anywhere else — there's no separate worker fleet, no managed cloud database, no serverless functions. One VPS, seven `eoxs-wiki-db` services plus one sibling-repo service, one Postgres instance.
+The backend server is the one physical machine everything else in this document set lives on: it hosts the database (`docs/postgres-database.md`), runs the raw-ingestion fetchers and their schedule (`docs/raw-ingestion.md`), runs the wiki-synthesis pipeline (`docs/wiki-ingestion.md`), and is where the Linear-reporting code executes from (`docs/linear-integration.md`). It also hosts the sibling `eoxs-frontend-threads` system (§2) and a Claude Code CLI / Codex CLI environment used directly for admin and development work (including a persistent `claude --teleport` session) — a real, load-bearing use of this being a full VPS, not just a place to run services, and the main reason a migration to a pure container-platform (see the DigitalOcean migration roadmap) can't simply move everything off it. Nothing in this system runs anywhere else — there's no separate worker fleet, no managed cloud database, no serverless functions. One VPS, nine `eoxs-wiki-db` services (the seven listed in §2 plus `eoxs-healthcheck.service`/`.timer`, §2.1) plus one sibling-repo service, one Postgres instance.

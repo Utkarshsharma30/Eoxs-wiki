@@ -237,10 +237,23 @@ sufficient.
    query rather than issuing a query per entity and stitching results yourself.
    Remember the 1000-row cap and 30-second timeout — aggregate in SQL rather
    than pulling rows to count them.
-5. **`search_wiki` is a genuine shortcut — try it.** A synthesized page can
-   answer in one call what would otherwise take several raw searches. It covers
-   promoted pages only, so fall through when it comes back thin, but do not skip
-   past it by reflex.
+5. **`search_wiki` (or `get_wiki_page`) is the FIRST call for almost any content
+   question — not a shortcut to try when convenient, a hard ordering rule.** A
+   synthesized page resolves entities/topics ("the PS Data thread", "what Tripp
+   Collier asked for") far more reliably than raw keyword search, which requires
+   the right words to literally co-occur and can miss the obviously-correct
+   thread entirely. Every wiki result carries `citations` — each with
+   `fetch_tool`/`fetch_identifier` (e.g. `get_email`/`67695`) — so a wiki hit
+   lets you jump straight to the exact raw record instead of re-searching raw
+   data blind. Concretely: **call `search_wiki`/`get_wiki_page` before
+   `search_emails`/`search_calls`/`search_assets`/`search_implementation_tasks`,
+   every time**, then follow a citation's `fetch_tool` if you need the full raw
+   text. Only fall through to a raw `search_*`/`list_*` call when the wiki comes
+   back empty or genuinely irrelevant — that's the fallback path, not the first
+   move. This applies even to query patterns that sound raw-source-shaped
+   ("find the email about X", "pull up the call where we discussed Y") — try
+   the wiki first regardless; it exists precisely to answer those without a
+   blind full-text search.
 6. **Call `get_index()` once per session.** Its counts do not change meaningfully
    mid-conversation.
 7. **Search narrow before broad.** Try the specific term first. Fan out across
@@ -260,8 +273,11 @@ sufficient.
 say that reviewed-but-unpromoted synthesis exists rather than implying nothing
 has been written.
 
-**A person** → `search_emails(name, account="all")`, then `search_calls(name)` if
-meetings are relevant. Try individual accounts only if `all` appears to miss
+**A person, or "did I email/discuss X" style questions** → `search_wiki(name or
+topic)` FIRST. Follow any citation whose `fetch_tool` is `get_email`/`get_call`
+to pull the exact thread/call directly. Only if the wiki has nothing relevant,
+fall back to `search_emails(name, account="all")`, then `search_calls(name)` if
+meetings are relevant — try individual accounts only if `all` appears to miss
 something.
 
 **A support issue, billing/invoice/revenue question, or anything pipeline/CRM/
@@ -273,9 +289,10 @@ something. If the question is about onboarding/dev work rather than a support
 ticket, that's `search_implementation_tasks` on eoxs-db instead — different
 board, different source, still in this system.
 
-**Open-ended** → `get_index()` if not already called → one targeted search →
-widen only if thin → pull full records for anything load-bearing. Name what you
-did not check rather than implying completeness.
+**Open-ended** → `get_index()` if not already called → `search_wiki` first →
+widen to raw `search_*`/`list_*` tools only if the wiki comes back thin → pull
+full records for anything load-bearing. Name what you did not check rather
+than implying completeness.
 
 ---
 
