@@ -127,6 +127,49 @@ CITATION_FETCH_HINTS = {
 }
 
 
+# Per-page "most recent real-world event this page actually describes",
+# computed from its citations' own dates -- NOT wiki_pages.updated_date,
+# which is wiki-synthesis time and has no reliable correlation with the
+# recency of the underlying content (confirmed 2026-09-08: two live pages
+# titled identically, "Ryan Capinski -> Tripp Collier (Collier Metals)
+# Referral Call", exist because wiki-ingestion's drafting agent failed to
+# detect an existing same-topic draft across a 6-hour cycle boundary and
+# both got independently promoted -- a separate, upstream duplication bug,
+# see docs/wiki-ingestion.md -- and get_wiki_page's old ORDER BY updated_date
+# DESC picked whichever page happened to be *synthesized* most recently,
+# which for a title match on just "Ryan Capinski" surfaced an unrelated
+# September page that merely mentions him in passing, over the actual
+# Collier-referral content, because that page's synthesis run was newer).
+# email_thread uses thread_dates (array, take the max); call_transcript uses
+# call_date; implementation_task uses task_updated_date (most-recently-
+# active, not creation); asset/repo_doc have no event-date of their own
+# (they're reference docs, not dated correspondence) so fall back to the
+# citation row's own updated_at as the least-bad signal available.
+_CITED_EVENT_DATE_SQL = """
+    (SELECT max(d) FROM (
+        SELECT (SELECT max(x) FROM unnest(t.thread_dates) x) AS d
+          FROM wiki_citations wc JOIN email_threads t ON t.id = wc.source_id
+         WHERE wc.wiki_page_id = wp.id AND wc.source_type = 'email_thread'
+        UNION ALL
+        SELECT t.call_date::timestamptz
+          FROM wiki_citations wc JOIN call_transcripts t ON t.id = wc.source_id
+         WHERE wc.wiki_page_id = wp.id AND wc.source_type = 'call_transcript'
+        UNION ALL
+        SELECT t.task_updated_date::timestamptz
+          FROM wiki_citations wc JOIN implementation_tasks t ON t.odoo_task_id = wc.source_id
+         WHERE wc.wiki_page_id = wp.id AND wc.source_type = 'implementation_task'
+        UNION ALL
+        SELECT t.updated_at
+          FROM wiki_citations wc JOIN assets t ON t.id = wc.source_id
+         WHERE wc.wiki_page_id = wp.id AND wc.source_type = 'asset'
+        UNION ALL
+        SELECT t.updated_at
+          FROM wiki_citations wc JOIN repo_docs t ON t.id = wc.source_id
+         WHERE wc.wiki_page_id = wp.id AND wc.source_type = 'repo_doc'
+    ) all_dates)
+"""
+
+
 def _citations_for_page(page_id, clearance):
     """Every raw source this wiki page cites, plus which tool+identifier to
     call to fetch the actual record -- so a citation can be followed
@@ -152,8 +195,15 @@ def _citations_for_page(page_id, clearance):
 
 
 def get_wiki_page(title, clearance=FULL_CLEARANCE):
+    # Ordered by the most recent event its own citations actually describe,
+    # not synthesis time (updated_date) -- see _CITED_EVENT_DATE_SQL's
+    # comment. A page with no resolvable citations (max = NULL) sorts last,
+    # then updated_date breaks any further tie.
     page = db_query_one(
-        "SELECT * FROM wiki_pages WHERE title ILIKE %s AND access_tier::text = ANY(%s) ORDER BY updated_date DESC NULLS LAST LIMIT 1",
+        f"""SELECT wp.* FROM wiki_pages wp
+            WHERE wp.title ILIKE %s AND wp.access_tier::text = ANY(%s)
+            ORDER BY {_CITED_EVENT_DATE_SQL} DESC NULLS LAST, wp.updated_date DESC NULLS LAST
+            LIMIT 1""",
         (f"%{title}%", clearance),
     )
     if not page:
@@ -184,13 +234,20 @@ def get_wiki_page(title, clearance=FULL_CLEARANCE):
 def search_wiki(query, clearance=FULL_CLEARANCE):
     # id included (previously omitted) so a hit can be chained straight into
     # get_wiki_page or a citations lookup without a second title-based search.
+    # Ranked by text relevance first (as before), with the cited event date
+    # (see _CITED_EVENT_DATE_SQL) as a tiebreak -- "the most recent X about Y"
+    # needs both: pure ts_rank alone has no way to prefer the newer of two
+    # similarly-relevant pages (e.g. two duplicate-titled pages about the
+    # same person/topic from different points in time).
     results = db_query(
-        """SELECT id, title, page_type, ts_headline('english', body, plainto_tsquery('english', %s)) AS snippet
-           FROM wiki_pages
-           WHERE body_tsv @@ plainto_tsquery('english', %s) AND access_tier::text = ANY(%s)
-           ORDER BY ts_rank(body_tsv, plainto_tsquery('english', %s)) DESC
-           LIMIT 20""",
-        (query, query, clearance, query),
+        f"""SELECT wp.id, wp.title, wp.page_type,
+                   ts_headline('english', wp.body, plainto_tsquery('english', %s)) AS snippet,
+                   ts_rank(wp.body_tsv, plainto_tsquery('english', %s)) AS rank
+            FROM wiki_pages wp
+            WHERE wp.body_tsv @@ plainto_tsquery('english', %s) AND wp.access_tier::text = ANY(%s)
+            ORDER BY rank DESC, {_CITED_EVENT_DATE_SQL} DESC NULLS LAST
+            LIMIT 20""",
+        (query, query, query, clearance),
     )
     for row in results:
         row["citations"] = _citations_for_page(row["id"], clearance)
@@ -336,32 +393,61 @@ def get_attachment_text(attachment_id, clearance=FULL_CLEARANCE):
     return row
 
 
-def list_calls(month="", source="", clearance=FULL_CLEARANCE):
+def list_calls(month="", date="", source="", clearance=FULL_CLEARANCE):
+    """date: optional 'YYYY-MM-DD' for day-level filtering (added 2026-09-08,
+    same reasoning as list_emails's date param -- call_date is a plain date
+    column here, so this is a straight equality check, no unnest needed)."""
     sql = "SELECT id, source, meeting_title, call_date, participants, source_file_path FROM call_transcripts WHERE access_tier::text = ANY(%s)"
     params = [clearance]
     if source:
         sql += " AND source = %s"
         params.append(source)
-    if month:
+    if date:
+        sql += " AND call_date = %s"
+        params.append(date)
+    elif month:
         sql += " AND to_char(call_date, 'YYYY-MM') = %s"
         params.append(month)
     sql += " ORDER BY call_date DESC NULLS LAST LIMIT 100"
     return db_query(sql, params)
 
 
-def search_calls(query, source="", clearance=FULL_CLEARANCE):
-    sql = """
-        SELECT id, source, meeting_title, call_date, source_file_path,
-               ts_headline('english', transcript_body, plainto_tsquery('english', %s)) AS snippet
-        FROM call_transcripts
-        WHERE transcript_tsv @@ plainto_tsquery('english', %s) AND access_tier::text = ANY(%s)
+def _search_calls_query(tsquery_fn, query, source, clearance):
+    sql = f"""
+        SELECT id, source, meeting_title, call_date, source_file_path, snippet, rank FROM (
+            SELECT DISTINCT ON (c.id) c.id, c.source, c.meeting_title, c.call_date, c.source_file_path,
+                   ts_headline('english', c.transcript_body, q.tsq) AS snippet,
+                   GREATEST(ts_rank(c.transcript_tsv, q.tsq), ts_rank(to_tsvector('english', c.meeting_title), q.tsq)) AS rank
+            FROM call_transcripts c
+            CROSS JOIN LATERAL (SELECT {tsquery_fn}('english', %s) AS tsq) q
+            WHERE (c.transcript_tsv @@ q.tsq OR to_tsvector('english', c.meeting_title) @@ q.tsq)
+              AND c.access_tier::text = ANY(%s)
     """
-    params = [query, query, clearance]
+    params = [query, clearance]
     if source:
-        sql += " AND source = %s"
+        sql += " AND c.source = %s"
         params.append(source)
-    sql += " ORDER BY call_date DESC NULLS LAST LIMIT 20"
+    # Rank first (a strong match shouldn't be pushed out by LIMIT), recency as
+    # tiebreak within similar relevance -- "the most recent call about X" needs
+    # both: pure call_date ordering (the old behavior) could drop the single
+    # best-matching call past LIMIT 20 behind irrelevant-but-newer calls that
+    # also happen to satisfy the AND query.
+    sql += " ORDER BY c.id, rank DESC) ranked ORDER BY rank DESC, call_date DESC NULLS LAST LIMIT 20"
     return db_query(sql, params)
+
+
+def search_calls(query, source="", clearance=FULL_CLEARANCE):
+    """Two-tier search (added 2026-09-08, same fix as search_emails): ranked
+    AND match against transcript body OR meeting_title (title was previously
+    selected but never matched against), falling back to a ranked OR match
+    only when AND finds nothing. Previously ordered purely by call_date DESC
+    with no relevance ranking at all -- a real match could be pushed past
+    LIMIT 20 by newer, less-relevant calls."""
+    results = _search_calls_query("plainto_tsquery", query, source, clearance)
+    if not results:
+        or_query = " or ".join(query.split())
+        results = _search_calls_query("websearch_to_tsquery", or_query, source, clearance)
+    return results
 
 
 def get_call(identifier, clearance=FULL_CLEARANCE):
@@ -557,10 +643,14 @@ def get_client_file(file_path, clearance=FULL_CLEARANCE):
     return {"error": f"no row found for file_path '{file_path}' in any loaded table"}
 
 
-def list_implementation_tasks(client="", stage="", clearance=FULL_CLEARANCE):
+def list_implementation_tasks(client="", stage="", date="", clearance=FULL_CLEARANCE):
+    """date: optional 'YYYY-MM-DD', matched against task_created_date OR
+    task_updated_date OR deadline (added 2026-09-08) -- this table has three
+    date columns and no single obvious one a day-filtered query means, so a
+    match against any of them is the safer default over silently picking one."""
     sql = """
         SELECT it.id, c.slug AS client, it.project_name, it.task_name, it.stage, it.owner,
-               it.priority, it.kanban_state, it.active, it.task_created_date, it.deadline
+               it.priority, it.kanban_state, it.active, it.task_created_date, it.task_updated_date, it.deadline
         FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
         WHERE it.access_tier::text = ANY(%s)
     """
@@ -571,35 +661,68 @@ def list_implementation_tasks(client="", stage="", clearance=FULL_CLEARANCE):
     if stage:
         sql += " AND it.stage = %s"
         params.append(stage)
+    if date:
+        sql += " AND (it.task_created_date = %s OR it.task_updated_date = %s OR it.deadline = %s)"
+        params.extend([date, date, date])
     sql += " ORDER BY it.task_created_date DESC NULLS LAST LIMIT 100"
     return db_query(sql, params)
 
 
-def search_implementation_tasks(query, client="", clearance=FULL_CLEARANCE):
-    sql = """
-        SELECT it.id, c.slug AS client, it.task_name, it.stage, it.owner, it.priority,
-               it.task_created_date
-        FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
-        WHERE (it.task_name ILIKE %s OR it.description ILIKE %s) AND it.access_tier::text = ANY(%s)
+def _search_implementation_tasks_query(tsquery_fn, query, client, clearance):
+    # implementation_tasks.task_tsv (schema/037_implementation_tasks_tsv.sql,
+    # 2026-09-08) -- a real stored generated column + GIN index, same pattern
+    # as email_messages.body_tsv/call_transcripts.transcript_tsv. Safe to add
+    # now that ingestion/write_implementation.py upserts on (client_id,
+    # odoo_task_id) instead of the full DELETE+INSERT this table used before
+    # (see that module's docstring) -- id and any derived/stored column
+    # survive a refresh.
+    sql = f"""
+        SELECT id, client, task_name, stage, owner, priority, task_created_date, snippet, rank FROM (
+            SELECT DISTINCT ON (it.id) it.id, c.slug AS client, it.task_name, it.stage, it.owner, it.priority,
+                   it.task_created_date,
+                   ts_headline('english', coalesce(it.description, ''), q.tsq) AS snippet,
+                   ts_rank(it.task_tsv, q.tsq) AS rank
+            FROM implementation_tasks it JOIN clients c ON c.id = it.client_id
+            CROSS JOIN LATERAL (SELECT {tsquery_fn}('english', %s) AS tsq) q
+            WHERE it.task_tsv @@ q.tsq AND it.access_tier::text = ANY(%s)
     """
-    params = [f"%{query}%", f"%{query}%", clearance]
+    params = [query, clearance]
     if client:
         sql += " AND c.slug = %s"
         params.append(client)
-    sql += " ORDER BY it.task_created_date DESC NULLS LAST LIMIT 20"
+    sql += " ORDER BY it.id, rank DESC) ranked ORDER BY rank DESC, task_created_date DESC NULLS LAST LIMIT 20"
     return db_query(sql, params)
+
+
+def search_implementation_tasks(query, client="", clearance=FULL_CLEARANCE):
+    """Two-tier tsvector search (added 2026-09-08, replacing whole-phrase
+    ILIKE '%query%' against task_name/description). The old version was
+    strictly worse than the email/call full-text bugs it mirrors: ILIKE on
+    the entire raw query string requires those exact words in that exact
+    order and adjacency to appear literally, so a multi-word query naming
+    several things (e.g. "Tripp Collier PS Data information") would almost
+    never match anything, even a task whose name/description contained all
+    the same words in a different order. Now word-level AND (ranked, via
+    task_tsv), with an OR fallback tier, same as search_emails/search_calls."""
+    results = _search_implementation_tasks_query("plainto_tsquery", query, client, clearance)
+    if not results:
+        or_query = " or ".join(query.split())
+        results = _search_implementation_tasks_query("websearch_to_tsquery", or_query, client, clearance)
+    return results
 
 
 def get_implementation_task(task_id, clearance=FULL_CLEARANCE):
     """Looks up by the serial `id` first, falling back to `odoo_task_id`.
-    The fallback exists because odoo_fetcher.py full-refreshes (DELETE+
-    INSERT) this table on every raw-ingestion sweep, so `id` isn't stable
-    across time the way `odoo_task_id` is -- a caller (like the
-    wiki-ingestion pipeline, which can reference a task hours or days
-    after first seeing it) needs a lookup that still resolves after `id`
-    has shifted. The two id spaces don't overlap (id: 15000s+, odoo_task_id:
-    under 1000, verified empirically), so trying `id` first is unambiguous
-    and doesn't change behavior for any existing caller passing a real id.
+    `id` IS stable now (ingestion/write_implementation.py upserts on
+    (client_id, odoo_task_id) rather than the full DELETE+INSERT this table
+    used before -- see that module's docstring), so the fallback mainly
+    matters for citations/references written while the old full-refresh
+    behavior was still live, or wherever odoo_task_id is the only id at
+    hand (e.g. a wiki_citations row, which always stores odoo_task_id, per
+    docs/wiki-ingestion.md §4). The two id spaces don't overlap (id: 15000s+,
+    odoo_task_id: under 1000, verified empirically), so trying `id` first is
+    unambiguous and doesn't change behavior for any existing caller passing
+    a real id.
 
     NOTE: odoo_task_id collides across different clients (the same task
     number can exist for multiple clients' Odoo instances) -- this lookup

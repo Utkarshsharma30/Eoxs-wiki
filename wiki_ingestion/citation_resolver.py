@@ -112,7 +112,7 @@ def resolve_pass(conn):
         if best and best_score >= 0.6 and len(target_words & _slug_words((best["subject"] or "").replace(" ", "-"))) >= 2:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE wiki_citations SET source_type = 'email_thread', source_id = %s WHERE id = %s",
+                    "UPDATE wiki_citations SET source_type = 'email_thread', source_id = %s, updated_at = now() WHERE id = %s",
                     (best["id"], row["id"]),
                 )
             conn.commit()
@@ -130,7 +130,7 @@ def mark_unresolvable(conn):
     shrinks. Doesn't touch source_id (stays NULL)."""
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE wiki_citations SET source_type = 'unresolvable' "
+            "UPDATE wiki_citations SET source_type = 'unresolvable', updated_at = now() "
             "WHERE source_type = 'unresolved' AND lower(source_ref_raw) = ANY(%s)",
             (list(_UNRESOLVABLE_LABELS),),
         )

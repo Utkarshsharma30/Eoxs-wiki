@@ -45,10 +45,11 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 | 033 | `033_assets_title_trgm.sql` | `idx_assets_title_trgm` — trigram index backing `search_assets`'s `similarity()`-ranked matching (`match_score` in its results). |
 | 034 | `034_repo_docs.sql` | `repo_docs` — this repository's own `docs/*.md` files, `ARCHITECTURE.md`, and a synthesized codebase-overview document, made queryable through MCP. Every row hardcoded `tier1` (Raj-only) at import time — unlike `assets`, not classified per-document, since the whole category is internal engineering/ops detail. Read-only: no write tools, no change-log table. See `docs/backend-server.md` §5 and `ingestion/import_repo_docs.py`. |
 | 035 | `035_tier2_confidential_hr.sql` | Adds `'tier2_confidential_hr'` to the enum — splits employee-facing HR/financial content (payroll, onboarding/offboarding, disciplinary action, sensitive credentials) out of `tier2_confidential`, so it's structurally invisible to `general` (internal team), not just redacted at query time. See `docs/backend-server.md` §5 and `ingestion/reclassify_hr_tier.py` for the one-time re-classification of existing rows. |
+| 036 | `036_redaction_report_cursor.sql` | `redaction_report_cursor` — one-row progress cursor for `ingestion/redaction_linear_report.py`, tracking the highest `mcp_redaction_log.id` already reported to Linear so each 2-hourly sweep only reports genuinely new redaction events. See `docs/linear-integration.md` §4a. |
 
 ## 2. Every table, grouped logically
 
-**43 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
+**44 base tables total**, across 2 schemas (`public` and `wiki_staging`). No other schemas exist.
 
 - **Employee directory:** `employees`, `employee_change_log` — directly-written operational data, deliberately NOT part of the wiki/tiered-content system (no `access_tier` column, never cited by a wiki page, never touched by wiki_ingestion). Gated to the `full` (Raj) and `hr` (Isha) identities only, see `docs/backend-server.md` §5.1.
 - **Reference:** `clients`, `contacts`
@@ -58,7 +59,7 @@ All schema changes are numbered, version-controlled SQL files in `/home/deploy/e
 - **Sales/Invoices:** `sales_orders`, `order_lines`, `sales_order_events`, `invoices`, `invoice_lines` — same MCP-tool removal as tickets; currently empty (0 rows) and, unlike tickets, not being repopulated.
 - **Calls:** `call_transcripts`, `call_segments`
 - **Implementation tasks:** `implementation_tasks`, `implementation_task_events`, `implementation_task_attachments`
-- **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`
+- **Operational/bookkeeping:** `ingest_log`, `db_sync_state`, `sync_cursors`, `message_ids_seen`, `schema_migrations`, `wiki_ingest_cycles`, `wiki_ingest_batches`, `wiki_ingest_seen`, `wiki_ingest_board_state`, `mcp_redaction_log`, `redaction_report_cursor` (schema/036, 2026-09-05 — one-row progress cursor for reporting `mcp_redaction_log` events to Linear, see `docs/linear-integration.md` §4a)
 - **Connected-account credentials:** `oauth_accounts` (per-account Gmail *and Zoho* refresh tokens — `gmail_fetcher.py`/`zoho_fetcher.py`'s `load_accounts()` read this instead of `.env`; `status`='active'/'revoked' soft-delete, `raw_sweep_enabled` separately controls whether the recurring sweep includes it, e.g. `remya_gmail` is active but sweep-disabled; `external_account_id` is Zoho-only, its numeric per-mailbox identifier; `client_type` picks which registered OAuth client to refresh against), `oauth_connect_tokens` (single-use expiring invite links for the self-serve OAuth connect flow — a row here is a capability, not a credential; consumed on first successful callback; `code_verifier` is Gmail-flow-only, PKCE). Sensitive — `refresh_token` is a live, revocable read credential for that mailbox; treat this table like `.env`, not like general reference data.
 - **Curated reference docs:** `assets`, `asset_change_log` (SOPs, company overview, ICP, salary register, product-feature specs — see migration 031 above). No `access_tier` uniformity on `assets` — classified per-document, since e.g. the salary register is far more sensitive than a GitLab branching SOP. Alongside `employees`/`employee_change_log`, this is the **only other** table pair in this database with a write path through the MCP server — `full` (any document) and `hr` (the salary register only), see `docs/backend-server.md` §5.2. No other table in this list has, or is planned to have, any write path.
 - **Repo self-reference docs:** `repo_docs` (this repo's own `docs/*.md`, `ARCHITECTURE.md`, and a synthesized codebase overview — see migration 034 above). Every row hardcoded `tier1` (Raj-only), read-only — no write tools, no change-log table (kept in sync by re-running `ingestion/import_repo_docs.py`, not edited live).
@@ -114,7 +115,11 @@ wiki_links: id serial PK, from_page_id int NOT NULL FK->wiki_pages,
   to_title_raw text NOT NULL, display_text text, context_snippet text
 
 wiki_citations: id serial PK, wiki_page_id int NOT NULL FK->wiki_pages,
-  source_type text NOT NULL, source_id int NULL, source_ref_raw text NOT NULL
+  source_type text NOT NULL, source_id int NULL, source_ref_raw text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now() (added schema/038, 2026-09-08 --
+  no timestamp of its own existed before; stamped by promote.py's initial INSERT
+  via the column default, and set explicitly on every UPDATE by
+  citation_resolver.py/citation_llm_resolver.py's re-resolution passes)
   -- polymorphic: NO database-level FK on (source_type, source_id), since the
   -- target table varies (email_thread / ticket / call_transcript / implementation_task)
 
@@ -170,7 +175,12 @@ call_segments: id serial PK, call_id int NOT NULL FK->call_transcripts,
 implementation_tasks: id serial PK, client_id int NOT NULL FK->clients, odoo_task_id int NOT NULL,
   project_name/task_name text NOT NULL, stage/owner/priority/kanban_state text, active bool,
   description text, task_created_date/task_updated_date/deadline date, generated_at timestamptz,
-  access_tier access_tier NOT NULL DEFAULT 'tier2'
+  access_tier access_tier NOT NULL DEFAULT 'tier2',
+  task_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', task_name || ' ' || description)) STORED,
+  GIN index on task_tsv (added schema/037, 2026-09-08 -- search_implementation_tasks previously did
+  ILIKE '%whole query string%' against task_name/description, requiring the entire multi-word query
+  to appear literally as a substring; real full-text search only became safe to add once id was
+  confirmed stable across refreshes -- see ingestion/write_implementation.py's docstring)
   UNIQUE (client_id, odoo_task_id)
 
 implementation_task_events: id serial PK, task_id int NOT NULL FK->implementation_tasks,
@@ -217,6 +227,12 @@ mcp_redaction_log: id serial PK, occurred_at timestamptz NOT NULL DEFAULT now(),
   clearance_name text NOT NULL ('hr' | 'general' -- never 'full', that identity skips
   the redaction check entirely), tool_name text NOT NULL,
   redacted_snippets text[] NOT NULL -- the exact spans that were removed
+
+redaction_report_cursor: id text PK DEFAULT 'singleton',
+  last_reported_id int NOT NULL DEFAULT 0 -- highest mcp_redaction_log.id already
+  reported to Linear, updated_at timestamptz NOT NULL DEFAULT now()
+  -- single-row cursor, same shape as wiki_ingest_board_state but tracking a row id
+  -- instead of a Linear issue id -- see docs/linear-integration.md §4a
 
 wiki_staging.wiki_pages: id serial PK, live_page_id int NULL (informal, no FK — points at
   public.wiki_pages.id once promoted), title text NOT NULL, page_type wiki_page_type NOT NULL,
@@ -286,23 +302,23 @@ Only two exist, identically in both databases: `plpgsql` (bundled default) and `
 
 No other application-relevant roles exist (the rest are Postgres 16's built-in `pg_*` predefined roles, unused here).
 
-## 7. Real current row counts (live `eoxs_wiki`, as of 2026-08-28)
+## 7. Real current row counts (live `eoxs_wiki`, as of 2026-09-07)
 
 | Table | Rows |
 |---|---|
-| call_segments | 184,984 |
-| email_messages | 67,238 |
-| email_threads | 34,889 |
-| email_attachments | 22,812 |
-| wiki_links | 14,083 |
-| call_transcripts | 2,416 |
-| wiki_pages | 1,909 |
+| call_segments | 187,489 |
+| email_messages | 68,382 |
+| email_threads | 35,341 |
+| email_attachments | 23,120 |
+| wiki_links | 14,332 |
+| call_transcripts | 2,434 |
+| wiki_pages | 2,063 |
 | implementation_tasks | 828 |
-| wiki_citations | 4,250 |
-| wiki_flags | 1,703 |
+| wiki_citations | 4,510 |
+| wiki_flags | 1,856 |
 | implementation_task_events | 5,613 |
 | implementation_task_attachments | 686 |
-| mcp_redaction_log | 1,359 |
+| mcp_redaction_log | 2,020 |
 | ticket_events | 107 |
 | tickets | 14 |
 | ticket_attachments | 2 |
@@ -313,22 +329,27 @@ No other application-relevant roles exist (the rest are Postgres 16's built-in `
 | invoice_lines | 0 |
 | clients | 8 |
 | contacts | 56 |
-| sync_cursors | 33 |
-| ingest_log | 305 |
-| schema_migrations | 34 |
-| wiki_ingest_cycles | 101 |
-| wiki_ingest_batches | 555 |
+| sync_cursors | 34 |
+| ingest_log | 431 |
+| schema_migrations | 36 |
+| wiki_ingest_cycles | 143 |
+| wiki_ingest_batches | 687 |
 | wiki_ingest_board_state | 1 |
-| wiki_staging.wiki_pages | 1,279 |
+| wiki_staging.wiki_pages | 1,536 |
 | assets | 19 |
-| repo_docs | 12 |
-| employees | 115 |
+| repo_docs | 14 |
+| employees | 138 |
+| employee_change_log | 262 |
+| asset_change_log | 9 |
+| oauth_accounts | 7 |
+| oauth_connect_tokens | 5 |
+| redaction_report_cursor | 1 (singleton row) |
 
-`tickets`/`ticket_events` remain **not zero and not static** — 14/107 rows, same lingering sweep bug as before (`docs/raw-ingestion.md` §12): the MCP-tool-surface removal and the historical-row deletion both happened, but the recurring sweep's `tickets_fetcher.py` invocation was never actually removed, so it keeps writing new rows nobody can query through Cruz anymore. `sales_orders`/`invoices` show the fully-removed, non-regrowing state — the fix that worked for one didn't get applied to the other. `assets` (19) and `repo_docs` (12) are both new categories since the 2026-08-12 snapshot — see `docs/raw-ingestion.md` §2 Assets and `docs/backend-server.md` §5.5.
+`tickets`/`ticket_events` remain **not zero and not static** — 14/107 rows, same lingering sweep bug as before (`docs/raw-ingestion.md` §12): the MCP-tool-surface removal and the historical-row deletion both happened, but the recurring sweep's `tickets_fetcher.py` invocation was never actually removed, so it keeps writing new rows nobody can query through Cruz anymore. `sales_orders`/`invoices` show the fully-removed, non-regrowing state — the fix that worked for one didn't get applied to the other. `repo_docs` grew from 12 to 14 rows as more `docs/*.md` files were added to the repo since its 2026-08-26 launch.
 
-**`access_tier` breakdown, `wiki_pages` (live):** 53 tier1 / 1,100 tier2_confidential / 756 tier2.
+**`access_tier` breakdown, `wiki_pages` (live):** 71 tier1 / 499 tier2_confidential_hr / 489 tier2_confidential / 1,004 tier2 — now a 4-way split following the 2026-09-02 `tier2_confidential_hr` carve-out (`docs/backend-server.md` §5).
 
-**`wiki_staging.wiki_pages` status (1,279 total):** 55 rejected, 1,224 promoted, 0 draft, 0 reviewed — consistent with promotion running automatically after every review sweep (see `docs/wiki-ingestion.md` §2); pages don't linger in `reviewed` status long enough to accumulate a backlog.
+**`wiki_staging.wiki_pages` status (1,536 total):** 72 rejected, 1,464 promoted, 0 draft, 0 reviewed — consistent with promotion running automatically after every review sweep (see `docs/wiki-ingestion.md` §2); pages don't linger in `reviewed` status long enough to accumulate a backlog.
 
 ## 8. Staging database (`eoxs_wiki_staging`)
 
@@ -355,7 +376,7 @@ Two genuinely distinct things share a similar name, and mixing them up is a comm
 
 They were deliberately designed to be same-database/different-schema (not a separate database) specifically so that **promotion is atomic** — a single transaction can move a page from draft to live, which wouldn't be possible if they lived in two separate physical databases.
 
-Current real status counts in `wiki_staging.wiki_pages` (229 total): **4 draft**, **210 reviewed**, **13 rejected**, **2 promoted**. See `docs/wiki-ingestion.md` for exactly how a row moves through these statuses.
+Current real status counts in `wiki_staging.wiki_pages` (1,536 total, as of 2026-09-07 — see §7 above): **0 draft**, **0 reviewed**, **72 rejected**, **1,464 promoted**. Zero rows sitting in `draft`/`reviewed` is expected, not stale data — promotion now runs automatically at the end of every review sweep (see `docs/wiki-ingestion.md` §2), so a page passes through those two intermediate states within the same sweep rather than lingering in a human-review backlog. See `docs/wiki-ingestion.md` for exactly how a row moves through these statuses.
 
 ## 10. Views, functions, triggers
 

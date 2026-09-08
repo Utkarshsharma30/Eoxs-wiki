@@ -292,7 +292,7 @@ async def _run(conn, rows):
         if match:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE wiki_citations SET source_type = %s, source_id = %s WHERE id = %s",
+                    "UPDATE wiki_citations SET source_type = %s, source_id = %s, updated_at = now() WHERE id = %s",
                     (match["source_type"], match["id"], row["citation_id"]),
                 )
             conn.commit()

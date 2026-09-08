@@ -8,3 +8,4 @@ bin/
 .env.bak*
 .env.*.bak
 *.bak.*
+logs/

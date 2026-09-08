@@ -33,6 +33,43 @@ def _fetch_reviewed(conn, staging_page_id):
         return cur.fetchone()
 
 
+def _find_live_page_by_title(conn, title):
+    """Exact-title (case/whitespace-insensitive) match against ALREADY-LIVE
+    wiki_pages -- added 2026-09-08 after finding 21 duplicate-title groups
+    (43 pages) live, all traced to the same mechanism: consolidate.py's
+    find_duplicate_groups() only ever compares unpromoted wiki_staging
+    drafts against each other, so if drafting (Phase 3) independently
+    produces two same-topic drafts in different 6-hour cycles (a real,
+    observed failure -- the LLM judgment call in
+    agent_mcp_server.py's search_wiki_inventory doesn't always find an
+    existing draft from a prior cycle) and either one gets promoted before
+    consolidation catches the pair, the surviving unpromoted draft has
+    nothing left to be deduplicated against -- consolidation never looks at
+    public.wiki_pages at all. That promoted duplicate then becomes
+    permanently invisible to the pipeline: any FUTURE draft on the same
+    topic would find the newer of the two (whichever a same-cycle
+    search_wiki_inventory call happens to surface) and correctly UPDATE it,
+    but the older orphaned sibling is never touched, cleaned up, or merged
+    again.
+
+    This closes the gap at the one place a NEW duplicate could still be
+    created going forward: right before a CREATE (staging row's
+    live_page_id IS NULL) actually inserts a new row, check whether a live
+    page with this exact title already exists. If one does, redirect to
+    UPDATE semantics against it instead of blindly creating a second one --
+    same effect as if the staging row's live_page_id had been set correctly
+    in the first place. Doesn't retroactively fix any of the 43 existing
+    duplicates (see wiki_ingestion/merge_live_duplicates.py for that
+    one-off cleanup) -- this only prevents new ones from this exact cause."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM wiki_pages WHERE lower(trim(title)) = lower(trim(%s)) ORDER BY id LIMIT 1",
+            (title,),
+        )
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
 def promote_page(staging_page_id):
     """Promotes one reviewed staging draft to public.wiki_pages. Returns
     {staging_page_id, live_page_id, action: 'created'|'updated'} on
@@ -45,7 +82,8 @@ def promote_page(staging_page_id):
 
         today = date.today()
         with conn.cursor() as cur:
-            if draft["live_page_id"] is None:
+            existing_live_id = _find_live_page_by_title(conn, draft["title"]) if draft["live_page_id"] is None else None
+            if draft["live_page_id"] is None and existing_live_id is None:
                 cur.execute(
                     """
                     INSERT INTO wiki_pages (
@@ -63,7 +101,17 @@ def promote_page(staging_page_id):
                 live_id = cur.fetchone()["id"]
                 action = "created"
             else:
-                live_id = draft["live_page_id"]
+                redirected_from_create = existing_live_id is not None
+                if redirected_from_create:
+                    # Redirected from CREATE to UPDATE -- a live page with
+                    # this exact title already existed even though this
+                    # staging draft's own live_page_id was NULL (see
+                    # _find_live_page_by_title's docstring for why that
+                    # happens). Prevents a second, duplicate live page from
+                    # ever being created for the same title again.
+                    live_id = existing_live_id
+                else:
+                    live_id = draft["live_page_id"]
                 cur.execute(
                     """
                     UPDATE wiki_pages SET
@@ -77,7 +125,11 @@ def promote_page(staging_page_id):
                         draft["body"], live_id,
                     ),
                 )
-                action = "updated"
+                # Distinct from a normal "updated" so this stays visible in
+                # promotion reports -- a duplicate-title collision was just
+                # avoided, worth knowing about even though it's now handled
+                # automatically.
+                action = "deduplicated_on_title" if redirected_from_create else "updated"
 
             cur.execute("DELETE FROM wiki_citations WHERE wiki_page_id = %s", (live_id,))
             cur.execute("DELETE FROM wiki_flags WHERE wiki_page_id = %s", (live_id,))
