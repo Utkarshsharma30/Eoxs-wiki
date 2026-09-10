@@ -21,7 +21,10 @@ import logging
 
 logger = logging.getLogger("ingestion.attachment_extract")
 
-MAX_EXTRACT_CHARS = 50000  # generous cap -- keeps one huge spreadsheet from dominating a row indefinitely
+MAX_EXTRACT_CHARS = 500000  # raised 2026-09-10 from 50000 -- that cap silently dropped an xlsx's
+# later sheets (sheet order in the file, not relevance, determines what survives truncation),
+# costing a real payroll query its August 2026 tab even though earlier sheets extracted fine.
+# 500000 chars verified end-to-end against a real 3.6MB/60-sheet payroll workbook with no issues.
 
 SUPPORTED_EXTENSIONS = {"pdf", "docx", "xlsx", "csv"}
 
